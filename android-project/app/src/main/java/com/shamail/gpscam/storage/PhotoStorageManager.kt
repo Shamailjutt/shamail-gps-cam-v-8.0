@@ -13,6 +13,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
+import android.util.Log
 import android.util.Size
 import androidx.core.content.FileProvider
 import androidx.exifinterface.media.ExifInterface
@@ -26,6 +27,7 @@ import com.shamail.gpscam.data.VideoGpsKeyframe
 import com.shamail.gpscam.data.WatermarkConfig
 import com.shamail.gpscam.data.WatermarkPosition
 import com.shamail.gpscam.data.WatermarkSize
+import com.shamail.gpscam.metadata.PhotoMetadataEngine
 import com.shamail.gpscam.video.Mp4MetadataUpdater
 import com.shamail.gpscam.video.Mp4VideoMetadata
 import com.shamail.gpscam.video.VideoWatermarkProcessor
@@ -307,6 +309,7 @@ object PhotoStorageManager {
         originalSourceExif: SourceExifSnapshot? = null,
         sourceDisplayName: String? = null
     ): Uri? {
+        val displayedMillis = config.resolveTimestampMillis(gps, captureDeviceMillis)
         val logoBitmap = WatermarkRenderer.loadLogoBitmap(context, config)
         val watermarked = WatermarkRenderer.renderOntoBitmap(
             source = sourceBitmap,
@@ -316,15 +319,10 @@ object PhotoStorageManager {
             captureMillis = captureDeviceMillis
         )
 
-        val fileStamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date(captureDeviceMillis))
-        val baseName = if (isGalleryImport) {
-            "SHAMAIL_GALLERY_GPS_$fileStamp.jpg"
-        } else {
-            "SHAMAIL_GPS_$fileStamp.jpg"
-        }
+        val fileStamp = PhotoMetadataEngine.formatFileStamp(displayedMillis)
+        val baseName = "SHAMAIL_GPS_$fileStamp.jpg"
         val fileName = ensureUniqueOutputFileName(context, baseName)
         val quality = config.jpegQuality.coerceIn(70, 100)
-        val displayedMillis = config.resolveTimestampMillis(gps, captureDeviceMillis)
 
         val effectiveOriginalMillis = if (isGalleryImport) {
             originalSourceExif?.dateTimeMillis ?: captureDeviceMillis
@@ -359,33 +357,31 @@ object PhotoStorageManager {
                     abs(gps.longitude - originalCaptureGps.longitude) > 0.0001
                 ))
 
-        val savedUri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            saveViaMediaStoreQ(
-                context = context,
-                bitmap = watermarked,
-                fileName = fileName,
-                quality = quality,
-                config = config,
-                originalExif = originalSourceExif,
-                originalGps = effectiveOriginalGps,
-                originalCaptureMillis = effectiveOriginalMillis,
-                isGalleryImport = isGalleryImport,
-                isCustomWatermark = customTimestamp || customLocation
+        val exportedGps = if (gps.hasFix) {
+            gps
+        } else if (originalSourceExif?.latitude != null && originalSourceExif.longitude != null) {
+            GpsSnapshot(
+                hasFix = true,
+                latitude = originalSourceExif.latitude,
+                longitude = originalSourceExif.longitude,
+                gpsTimestampMillis = displayedMillis,
+                locationSource = LocationSource.LIVE_GPS
             )
         } else {
-            saveViaLegacyPublicPictures(
-                context = context,
-                bitmap = watermarked,
-                fileName = fileName,
-                quality = quality,
-                config = config,
-                originalExif = originalSourceExif,
-                originalGps = effectiveOriginalGps,
-                originalCaptureMillis = effectiveOriginalMillis,
-                isGalleryImport = isGalleryImport,
-                isCustomWatermark = customTimestamp || customLocation
-            )
+            GpsSnapshot(hasFix = false)
         }
+
+        val savedUri = exportWatermarkedPhoto(
+            context = context,
+            watermarkedBitmap = watermarked,
+            fileName = fileName,
+            quality = quality,
+            config = config,
+            originalExif = originalSourceExif,
+            exportedGps = exportedGps,
+            displayedMillis = displayedMillis,
+            isGalleryImport = isGalleryImport
+        )
 
         if (savedUri != null) {
             persistCleanSourceBackup(
@@ -625,8 +621,8 @@ object PhotoStorageManager {
             replaceExistingWatermark = false
         )
 
-        val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date(editedMillis))
-        val fileName = ensureUniqueOutputFileName(context, "SHAMAIL_GPS_${stamp}_copy.jpg")
+        val stamp = PhotoMetadataEngine.formatFileStamp(editedMillis)
+        val fileName = ensureUniqueOutputFileName(context, "SHAMAIL_GPS_$stamp.jpg")
         val quality = updatedConfig.jpegQuality.coerceIn(70, 100)
 
         val originalGps = if (editable.sourceExif.latitude != null && editable.sourceExif.longitude != null) {
@@ -643,33 +639,23 @@ object PhotoStorageManager {
             GpsSnapshot(hasFix = false)
         }
 
-        val savedUri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            saveViaMediaStoreQ(
-                context = context,
-                bitmap = watermarked,
-                fileName = fileName,
-                quality = quality,
-                config = updatedConfig,
-                originalExif = editable.sourceExif,
-                originalGps = originalGps,
-                originalCaptureMillis = editable.originalCaptureMillis,
-                isGalleryImport = false,
-                isCustomWatermark = true
-            )
+        val exportedGps = if (editedGps.hasFix) {
+            editedGps
         } else {
-            saveViaLegacyPublicPictures(
-                context = context,
-                bitmap = watermarked,
-                fileName = fileName,
-                quality = quality,
-                config = updatedConfig,
-                originalExif = editable.sourceExif,
-                originalGps = originalGps,
-                originalCaptureMillis = editable.originalCaptureMillis,
-                isGalleryImport = false,
-                isCustomWatermark = true
-            )
+            originalGps
         }
+
+        val savedUri = exportWatermarkedPhoto(
+            context = context,
+            watermarkedBitmap = watermarked,
+            fileName = fileName,
+            quality = quality,
+            config = updatedConfig,
+            originalExif = editable.sourceExif,
+            exportedGps = exportedGps,
+            displayedMillis = editedMillis,
+            isGalleryImport = false
+        )
 
         if (savedUri != null) {
             persistCleanSourceBackup(
@@ -802,48 +788,160 @@ object PhotoStorageManager {
         )
     }
 
-    private fun saveViaMediaStoreQ(
+    private fun exportWatermarkedPhoto(
         context: Context,
-        bitmap: Bitmap,
+        watermarkedBitmap: Bitmap,
         fileName: String,
         quality: Int,
         config: WatermarkConfig,
         originalExif: SourceExifSnapshot?,
-        originalGps: GpsSnapshot,
-        originalCaptureMillis: Long,
-        isGalleryImport: Boolean,
-        isCustomWatermark: Boolean
+        exportedGps: GpsSnapshot,
+        displayedMillis: Long,
+        isGalleryImport: Boolean
+    ): Uri? {
+        val tempFile = File(context.cacheDir, "shamail_export_${System.nanoTime()}.jpg")
+        return try {
+            FileOutputStream(tempFile).use { out ->
+                val compressed = watermarkedBitmap.compress(Bitmap.CompressFormat.JPEG, quality, out)
+                if (!compressed) return null
+            }
+
+            runCatching {
+                val exif = ExifInterface(tempFile.absolutePath)
+                applyPreservedHardwareExif(
+                    exif = exif,
+                    config = config,
+                    originalExif = originalExif,
+                    exportedGps = exportedGps,
+                    isGalleryImport = isGalleryImport
+                )
+                exif.saveAttributes()
+            }
+
+            val exportedLat = if (exportedGps.hasFix) exportedGps.latitude else originalExif?.latitude
+            val exportedLon = if (exportedGps.hasFix) exportedGps.longitude else originalExif?.longitude
+
+            val metaApplied = PhotoMetadataEngine.applyShamailMetadata(
+                filePath = tempFile.absolutePath,
+                dateTimeMillis = displayedMillis,
+                latitude = exportedLat,
+                longitude = exportedLon
+            )
+            if (!metaApplied) {
+                Log.w("ShamailMeta", "applyShamailMetadata returned false for $fileName")
+            }
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val savedUri = saveViaMediaStoreQ(
+                    context = context,
+                    preparedJpegFile = tempFile,
+                    fileName = fileName,
+                    displayedMillis = displayedMillis
+                )
+                if (savedUri != null) {
+                    verifySavedMediaStorePhoto(
+                        context = context,
+                        savedUri = savedUri,
+                        expectedMillis = displayedMillis,
+                        expectedLat = exportedLat,
+                        expectedLon = exportedLon,
+                        expectedFileName = fileName
+                    )
+                }
+                savedUri
+            } else {
+                val savedResult = saveViaLegacyPublicPictures(
+                    context = context,
+                    preparedJpegFile = tempFile,
+                    fileName = fileName,
+                    displayedMillis = displayedMillis
+                ) ?: return null
+
+                PhotoMetadataEngine.verifyExportedMetadata(
+                    filePath = savedResult.second.absolutePath,
+                    expectedMillis = displayedMillis,
+                    expectedLat = exportedLat,
+                    expectedLon = exportedLon,
+                    expectedFileName = fileName
+                )
+                savedResult.first
+            }
+        } catch (_: Exception) {
+            null
+        } finally {
+            if (tempFile.exists()) {
+                tempFile.delete()
+            }
+        }
+    }
+
+    private fun verifySavedMediaStorePhoto(
+        context: Context,
+        savedUri: Uri,
+        expectedMillis: Long,
+        expectedLat: Double?,
+        expectedLon: Double?,
+        expectedFileName: String
+    ) {
+        val verifyTemp = File(context.cacheDir, "shamail_verify_${System.nanoTime()}.jpg")
+        try {
+            context.contentResolver.openInputStream(savedUri)?.use { input ->
+                FileOutputStream(verifyTemp).use { out ->
+                    input.copyTo(out)
+                }
+            }
+            if (verifyTemp.exists() && verifyTemp.length() > 0L) {
+                PhotoMetadataEngine.verifyExportedMetadata(
+                    filePath = verifyTemp.absolutePath,
+                    expectedMillis = expectedMillis,
+                    expectedLat = expectedLat,
+                    expectedLon = expectedLon,
+                    expectedFileName = expectedFileName
+                )
+            } else {
+                Log.i("ShamailMeta", "VERIFY FAIL [$expectedFileName]: could not read back saved MediaStore stream")
+            }
+        } catch (e: Exception) {
+            Log.i("ShamailMeta", "VERIFY FAIL [$expectedFileName]: ${e.message}")
+        } finally {
+            if (verifyTemp.exists()) {
+                verifyTemp.delete()
+            }
+        }
+    }
+
+    private fun saveViaMediaStoreQ(
+        context: Context,
+        preparedJpegFile: File,
+        fileName: String,
+        displayedMillis: Long
     ): Uri? {
         val resolver = context.contentResolver
+        val timeSec = (displayedMillis / 1000L).coerceAtLeast(1L)
         val values = ContentValues().apply {
             put(MediaStore.Images.Media.DISPLAY_NAME, fileName)
             put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
             put(MediaStore.Images.Media.RELATIVE_PATH, "${Environment.DIRECTORY_PICTURES}/$SUBFOLDER_NAME")
-            put(MediaStore.Images.Media.DATE_ADDED, System.currentTimeMillis() / 1000L)
-            put(MediaStore.Images.Media.DATE_TAKEN, originalCaptureMillis)
+            put(MediaStore.Images.Media.DATE_TAKEN, displayedMillis)
+            put(MediaStore.Images.Media.DATE_ADDED, timeSec)
+            put(MediaStore.Images.Media.DATE_MODIFIED, timeSec)
             put(MediaStore.Images.Media.IS_PENDING, 1)
         }
 
         val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values) ?: return null
         return try {
             resolver.openOutputStream(uri)?.use { out ->
-                bitmap.compress(Bitmap.CompressFormat.JPEG, quality, out)
-            }
-            resolver.openFileDescriptor(uri, "rw")?.use { pfd ->
-                val exif = ExifInterface(pfd.fileDescriptor)
-                applyPreservedExifMetadata(
-                    exif = exif,
-                    config = config,
-                    originalExif = originalExif,
-                    originalGps = originalGps,
-                    originalCaptureMillis = originalCaptureMillis,
-                    isGalleryImport = isGalleryImport,
-                    isCustomWatermark = isCustomWatermark
-                )
-                exif.saveAttributes()
+                preparedJpegFile.inputStream().use { input ->
+                    input.copyTo(out)
+                }
+            } ?: run {
+                runCatching { resolver.delete(uri, null, null) }
+                return null
             }
             val doneValues = ContentValues().apply {
                 put(MediaStore.Images.Media.IS_PENDING, 0)
+                put(MediaStore.Images.Media.DATE_TAKEN, displayedMillis)
+                put(MediaStore.Images.Media.DATE_MODIFIED, timeSec)
             }
             resolver.update(uri, doneValues, null, null)
             uri
@@ -855,16 +953,10 @@ object PhotoStorageManager {
 
     private fun saveViaLegacyPublicPictures(
         context: Context,
-        bitmap: Bitmap,
+        preparedJpegFile: File,
         fileName: String,
-        quality: Int,
-        config: WatermarkConfig,
-        originalExif: SourceExifSnapshot?,
-        originalGps: GpsSnapshot,
-        originalCaptureMillis: Long,
-        isGalleryImport: Boolean,
-        isCustomWatermark: Boolean
-    ): Uri? {
+        displayedMillis: Long
+    ): Pair<Uri, File>? {
         return try {
             @Suppress("DEPRECATION")
             val picturesRoot = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES)
@@ -872,21 +964,8 @@ object PhotoStorageManager {
             if (!targetDir.exists()) targetDir.mkdirs()
 
             val outFile = File(targetDir, fileName)
-            FileOutputStream(outFile).use { out ->
-                bitmap.compress(Bitmap.CompressFormat.JPEG, quality, out)
-            }
-
-            val exif = ExifInterface(outFile.absolutePath)
-            applyPreservedExifMetadata(
-                exif = exif,
-                config = config,
-                originalExif = originalExif,
-                originalGps = originalGps,
-                originalCaptureMillis = originalCaptureMillis,
-                isGalleryImport = isGalleryImport,
-                isCustomWatermark = isCustomWatermark
-            )
-            exif.saveAttributes()
+            preparedJpegFile.copyTo(outFile, overwrite = true)
+            outFile.setLastModified(displayedMillis)
 
             MediaScannerConnection.scanFile(
                 context,
@@ -895,39 +974,25 @@ object PhotoStorageManager {
                 null
             )
 
-            FileProvider.getUriForFile(
+            val uri = FileProvider.getUriForFile(
                 context,
                 "${context.packageName}.fileprovider",
                 outFile
             )
+            Pair(uri, outFile)
         } catch (_: Exception) {
             null
         }
     }
 
-    private fun applyPreservedExifMetadata(
+    private fun applyPreservedHardwareExif(
         exif: ExifInterface,
         config: WatermarkConfig,
         originalExif: SourceExifSnapshot?,
-        originalGps: GpsSnapshot,
-        originalCaptureMillis: Long,
-        isGalleryImport: Boolean,
-        isCustomWatermark: Boolean
+        exportedGps: GpsSnapshot,
+        isGalleryImport: Boolean
     ) {
-        val exifDateFmt = SimpleDateFormat("yyyy:MM:dd HH:mm:ss", Locale.US)
-
         if (originalExif != null) {
-            if (!originalExif.dateTimeOriginal.isNullOrBlank()) {
-                exif.setAttribute(ExifInterface.TAG_DATETIME_ORIGINAL, originalExif.dateTimeOriginal)
-            }
-            if (!originalExif.dateTimeDigitized.isNullOrBlank()) {
-                exif.setAttribute(ExifInterface.TAG_DATETIME_DIGITIZED, originalExif.dateTimeDigitized)
-            }
-            if (!originalExif.dateTime.isNullOrBlank()) {
-                exif.setAttribute(ExifInterface.TAG_DATETIME, originalExif.dateTime)
-            } else if (!originalExif.dateTimeOriginal.isNullOrBlank()) {
-                exif.setAttribute(ExifInterface.TAG_DATETIME, originalExif.dateTimeOriginal)
-            }
             if (!originalExif.make.isNullOrBlank()) exif.setAttribute(ExifInterface.TAG_MAKE, originalExif.make)
             if (!originalExif.model.isNullOrBlank()) exif.setAttribute(ExifInterface.TAG_MODEL, originalExif.model)
             if (!originalExif.exposureTime.isNullOrBlank()) exif.setAttribute(ExifInterface.TAG_EXPOSURE_TIME, originalExif.exposureTime)
@@ -937,36 +1002,19 @@ object PhotoStorageManager {
             if (!originalExif.flash.isNullOrBlank()) exif.setAttribute(ExifInterface.TAG_FLASH, originalExif.flash)
             if (!originalExif.whiteBalance.isNullOrBlank()) exif.setAttribute(ExifInterface.TAG_WHITE_BALANCE, originalExif.whiteBalance)
         } else if (!isGalleryImport) {
-            val captureExifStr = exifDateFmt.format(Date(originalCaptureMillis))
-            exif.setAttribute(ExifInterface.TAG_DATETIME, captureExifStr)
-            exif.setAttribute(ExifInterface.TAG_DATETIME_ORIGINAL, captureExifStr)
-            exif.setAttribute(ExifInterface.TAG_DATETIME_DIGITIZED, captureExifStr)
             if (!Build.MANUFACTURER.isNullOrBlank()) exif.setAttribute(ExifInterface.TAG_MAKE, Build.MANUFACTURER)
             if (!Build.MODEL.isNullOrBlank()) exif.setAttribute(ExifInterface.TAG_MODEL, Build.MODEL)
         }
 
-        if (originalExif?.latitude != null && originalExif.longitude != null) {
-            exif.setLatLong(originalExif.latitude, originalExif.longitude)
-        } else if (originalGps.hasFix && originalGps.locationSource == LocationSource.LIVE_GPS && !isGalleryImport) {
-            exif.setLatLong(originalGps.latitude, originalGps.longitude)
+        if (exportedGps.hasFix && exportedGps.locationSource == LocationSource.LIVE_GPS && !isGalleryImport) {
             exif.setAttribute(
                 ExifInterface.TAG_GPS_PROCESSING_METHOD,
-                if (originalGps.isOfflineAddress) "GPS_OFFLINE" else "FUSED_GPS"
+                if (exportedGps.isOfflineAddress) "GPS_OFFLINE" else "FUSED_GPS"
             )
         }
 
         exif.setAttribute(ExifInterface.TAG_SOFTWARE, "Gps cam by shamail v2.0.0")
         exif.setAttribute(ExifInterface.TAG_ARTIST, config.organizationName)
-
-        val sourceTag = when {
-            isGalleryImport && isCustomWatermark -> "CUSTOM_WATERMARK_GALLERY_COPY"
-            isGalleryImport -> "GALLERY_GPS_WATERMARK_COPY"
-            isCustomWatermark -> "CUSTOM_WATERMARK_INFO"
-            config.timestampMode == TimestampMode.GPS_FIX -> "VERIFIED_GPS_CAPTURE"
-            else -> "VERIFIED_DEVICE_CAPTURE"
-        }
-        exif.setAttribute(ExifInterface.TAG_USER_COMMENT, sourceTag)
-        exif.setAttribute(ExifInterface.TAG_IMAGE_DESCRIPTION, "${config.organizationName} | $sourceTag")
     }
 
     fun listSavedPhotos(context: Context): List<SavedPhotoItem> {

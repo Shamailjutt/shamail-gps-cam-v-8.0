@@ -655,6 +655,11 @@ class MainActivity : AppCompatActivity() {
                         var orientedReadyFile: File? = null
                         var directSavedUri: Uri? = null
                         try {
+                            val rawSourceExif = PhotoStorageManager.readSourcePhotoExif(
+                                context = this@MainActivity,
+                                uri = Uri.fromFile(rawTempFile),
+                                filePath = rawTempFile.absolutePath
+                            )
                             val oriented = PhotoStorageManager.decodeAndOrientTempCapture(
                                 tempFile = rawTempFile,
                                 isFrontCamera = isFront,
@@ -677,7 +682,8 @@ class MainActivity : AppCompatActivity() {
                                         sourceBitmap = oriented,
                                         config = capturedConfig,
                                         gps = capturedGps,
-                                        captureDeviceMillis = captureMomentMillis
+                                        captureDeviceMillis = captureMomentMillis,
+                                        originalSourceExif = rawSourceExif
                                     )
                                 }
                                 oriented.recycle()
