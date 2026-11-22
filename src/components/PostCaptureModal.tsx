@@ -12,6 +12,7 @@ import {
 import {
   CapturedPhoto,
   GpsData,
+  OriginalPhotoRecord,
   SavedLocationBookmark,
   TimestampMode,
   WatermarkSettings,
@@ -23,6 +24,8 @@ import {
   loadImageElement,
   resolveTimestampMillis,
 } from '../utils/watermarkCanvas';
+import { formatFileStamp } from '../utils/jpegExif';
+import { ensureUniqueExportFileName } from '../utils/photoDb';
 import { bookmarkToGpsData, listSavedLocations } from '../utils/savedLocations';
 import { SequentialDateTimeModal } from './SequentialDateTimeModal';
 
@@ -33,6 +36,7 @@ export interface PostCaptureModalProps {
   captureMillis: number;
   defaultLogoUrl: string;
   existingPhoto?: CapturedPhoto | null;
+  originalPhoto?: OriginalPhotoRecord | null;
   onCancel: () => void;
   onSave: (
     photoRecord: CapturedPhoto,
@@ -49,17 +53,26 @@ export function PostCaptureModal({
   captureMillis,
   defaultLogoUrl,
   existingPhoto = null,
+  originalPhoto = null,
   onCancel,
   onSave,
 }: PostCaptureModalProps) {
+  const effectiveOriginalExif =
+    originalPhoto?.originalExif ?? existingPhoto?.originalExif ?? null;
   const startingGps = existingPhoto?.gpsSnapshot || initialGps;
-  const startingEffectiveMs = resolveTimestampMillis(initialSettings, startingGps, captureMillis);
+  const baseSettings = existingPhoto?.settingsSnapshot || initialSettings;
+  const startingEffectiveMs = existingPhoto
+    ? existingPhoto.selectedTimestampMillis ??
+      resolveTimestampMillis(baseSettings, startingGps, existingPhoto.capturedDeviceMillis)
+    : resolveTimestampMillis(initialSettings, startingGps, captureMillis);
 
   const [draftSettings, setDraftSettings] = useState<WatermarkSettings>(() => ({
-    ...initialSettings,
-    manualTimestampMillis:
-      initialSettings.timestampMode === TimestampMode.Manual
-        ? initialSettings.manualTimestampMillis
+    ...baseSettings,
+    timestampMode: existingPhoto ? TimestampMode.Manual : baseSettings.timestampMode,
+    manualTimestampMillis: existingPhoto
+      ? startingEffectiveMs
+      : baseSettings.timestampMode === TimestampMode.Manual
+        ? baseSettings.manualTimestampMillis
         : startingEffectiveMs,
   }));
 
@@ -82,9 +95,11 @@ export function PostCaptureModal({
   const [baseImg, setBaseImg] = useState<HTMLImageElement | null>(null);
   const [previewResult, setPreviewResult] = useState<{
     dataUrl: string;
+    jpegBytes: ArrayBuffer;
     width: number;
     height: number;
     timestampText: string;
+    selectedTimestampMillis: number;
   } | null>(null);
   const [saving, setSaving] = useState<boolean>(false);
 
@@ -108,6 +123,7 @@ export function PostCaptureModal({
       gps: draftGps,
       defaultLogoUrl,
       captureMillis,
+      originalExif: effectiveOriginalExif,
     })
       .then((res) => {
         if (active) setPreviewResult(res);
@@ -116,7 +132,7 @@ export function PostCaptureModal({
     return () => {
       active = false;
     };
-  }, [baseImg, draftSettings, draftGps, defaultLogoUrl, captureMillis]);
+  }, [baseImg, draftSettings, draftGps, defaultLogoUrl, captureMillis, effectiveOriginalExif]);
 
   const handleResetToCurrent = () => {
     const now = Date.now();
@@ -168,40 +184,44 @@ export function PostCaptureModal({
     if (saving || !baseImg) return;
     setSaving(true);
     try {
-      const rendered =
-        previewResult ||
-        (await composeWatermarkedPhoto({
-          sourceElement: baseImg,
-          isMirroredFrontCamera: false,
-          settings: draftSettings,
-          gps: draftGps,
-          defaultLogoUrl,
-          captureMillis,
-        }));
+      const exportMoment = Date.now();
+      const rendered = await composeWatermarkedPhoto({
+        sourceElement: baseImg,
+        isMirroredFrontCamera: false,
+        settings: draftSettings,
+        gps: draftGps,
+        defaultLogoUrl,
+        captureMillis,
+        originalExif: effectiveOriginalExif,
+      });
 
-      const d = new Date(captureMillis);
-      const stampId = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(
-        d.getDate()
-      ).padStart(2, '0')}_${String(d.getHours()).padStart(2, '0')}${String(
-        d.getMinutes()
-      ).padStart(2, '0')}${String(d.getSeconds()).padStart(2, '0')}`;
+      const stampId = formatFileStamp(rendered.selectedTimestampMillis);
+      const uniqueFileName = await ensureUniqueExportFileName(`SHAMAIL_GPS_${stampId}.jpg`);
 
       const photoRecord: CapturedPhoto = {
-        id: existingPhoto ? existingPhoto.id : `photo_${captureMillis}`,
-        fileName: existingPhoto ? existingPhoto.fileName : `SHAMAIL_GPS_${stampId}.jpg`,
+        id: `photo_${exportMoment}_${Math.random().toString(36).slice(2, 7)}`,
+        fileName: uniqueFileName,
         dataUrl: rendered.dataUrl,
-        rawBaseDataUrl,
+        jpegBytes: rendered.jpegBytes,
+        originalPhotoId: originalPhoto?.id ?? existingPhoto?.originalPhotoId,
+        originalFileName: originalPhoto?.fileName ?? existingPhoto?.originalFileName,
+        originalExif: effectiveOriginalExif || undefined,
+        rawBaseDataUrl: originalPhoto?.dataUrl || existingPhoto?.rawBaseDataUrl || rawBaseDataUrl,
         gpsSnapshot: draftGps,
         width: rendered.width,
         height: rendered.height,
-        capturedDeviceMillis: captureMillis,
+        capturedDeviceMillis: existingPhoto?.capturedDeviceMillis ?? captureMillis,
+        selectedTimestampMillis: rendered.selectedTimestampMillis,
         displayedTimestampText: rendered.timestampText,
         isEditedTimestamp: draftSettings.timestampMode === TimestampMode.Manual,
         timestampMode: draftSettings.timestampMode,
+        settingsSnapshot: { ...draftSettings },
         organizationName: draftSettings.organizationName || 'SHAMAIL PERA',
         locationHeadline: buildLocationHeadline(draftGps),
         coordinatesText: formatWatermarkCoordinates(draftSettings, draftGps),
         accuracyMeters: draftGps.accuracyMeters,
+        isGalleryExport: existingPhoto?.isGalleryExport,
+        exportedAtMillis: exportMoment,
       };
 
       await onSave(photoRecord, draftSettings, draftGps, alsoDownload);
@@ -227,11 +247,17 @@ export function PostCaptureModal({
             <div className="min-w-0">
               <h2 className="text-sm sm:text-base font-bold text-slate-100 truncate">
                 {existingPhoto
-                  ? 'Customize Saved GPS Photo'
+                  ? 'Create New GPS Export Copy'
                   : 'Review & Customize GPS Photo Before Saving'}
               </h2>
               <p className="text-xs text-slate-400 truncate">
-                Editor Source: {draftGps.sourceLabel} · Clean SHAMAIL PERA watermark preview
+                {existingPhoto
+                  ? `Saves a separate EXIF-updated JPEG · ${
+                      originalPhoto?.fileName || existingPhoto.originalFileName
+                        ? `Original "${originalPhoto?.fileName || existingPhoto.originalFileName}" stays untouched`
+                        : 'Previous export remains untouched'
+                    }`
+                  : `Editor Source: ${draftGps.sourceLabel} · Clean SHAMAIL PERA watermark preview`}
               </p>
             </div>
           </div>

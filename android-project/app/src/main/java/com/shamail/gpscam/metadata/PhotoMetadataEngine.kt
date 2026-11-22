@@ -6,6 +6,7 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.TimeZone
 import kotlin.math.abs
 
 object PhotoMetadataEngine {
@@ -25,6 +26,13 @@ object PhotoMetadataEngine {
         return SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date(millis))
     }
 
+    private fun formatExifOffset(millis: Long): String {
+        val offsetMs = TimeZone.getDefault().getOffset(millis)
+        val totalMin = abs(offsetMs) / 60_000
+        val sign = if (offsetMs >= 0) "+" else "-"
+        return String.format(Locale.US, "%s%02d:%02d", sign, totalMin / 60, totalMin % 60)
+    }
+
     fun applyShamailMetadata(
         filePath: String,
         dateTimeMillis: Long,
@@ -40,13 +48,29 @@ object PhotoMetadataEngine {
         return try {
             val exif = ExifInterface(file.absolutePath)
             val formattedTimestamp = formatExifTimestamp(dateTimeMillis)
+            val formattedOffset = formatExifOffset(dateTimeMillis)
 
             exif.setAttribute(ExifInterface.TAG_DATETIME, formattedTimestamp)
             exif.setAttribute(ExifInterface.TAG_DATETIME_ORIGINAL, formattedTimestamp)
             exif.setAttribute(ExifInterface.TAG_DATETIME_DIGITIZED, formattedTimestamp)
+            exif.setAttribute(ExifInterface.TAG_OFFSET_TIME, formattedOffset)
+            exif.setAttribute(ExifInterface.TAG_OFFSET_TIME_ORIGINAL, formattedOffset)
+            exif.setAttribute(ExifInterface.TAG_OFFSET_TIME_DIGITIZED, formattedOffset)
+
+            // Clear conflicting old sub-second fractions from previous captures
+            exif.setAttribute(ExifInterface.TAG_SUBSEC_TIME, null)
+            exif.setAttribute(ExifInterface.TAG_SUBSEC_TIME_ORIGINAL, null)
+            exif.setAttribute(ExifInterface.TAG_SUBSEC_TIME_DIGITIZED, null)
 
             if (latitude != null && longitude != null && latitude.isFinite() && longitude.isFinite()) {
                 exif.setLatLong(latitude, longitude)
+                val utcTz = TimeZone.getTimeZone("UTC")
+                val gpsDate = SimpleDateFormat("yyyy:MM:dd", Locale.US).apply { timeZone = utcTz }
+                    .format(Date(dateTimeMillis))
+                val gpsTime = SimpleDateFormat("HH:mm:ss", Locale.US).apply { timeZone = utcTz }
+                    .format(Date(dateTimeMillis))
+                exif.setAttribute(ExifInterface.TAG_GPS_DATESTAMP, gpsDate)
+                exif.setAttribute(ExifInterface.TAG_GPS_TIMESTAMP, gpsTime)
             }
 
             exif.setAttribute(ExifInterface.TAG_IMAGE_DESCRIPTION, IMAGE_DESCRIPTION)

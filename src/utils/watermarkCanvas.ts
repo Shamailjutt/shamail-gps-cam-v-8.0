@@ -7,6 +7,12 @@ import {
   WatermarkSettings,
   WatermarkSize,
 } from '../types';
+import {
+  applyExifMetadataToJpeg,
+  canvasToJpegBytes,
+  ParsedExifMetadata,
+  uint8ArrayToDataUrl,
+} from './jpegExif';
 
 const MONTHS_SHORT = [
   'Jan',
@@ -711,9 +717,24 @@ export async function composeWatermarkedPhoto(params: {
   gps: GpsData;
   defaultLogoUrl: string;
   captureMillis: number;
-}): Promise<{ dataUrl: string; width: number; height: number; timestampText: string }> {
-  const { sourceElement, isMirroredFrontCamera, settings, gps, defaultLogoUrl, captureMillis } =
-    params;
+  originalExif?: ParsedExifMetadata | null;
+}): Promise<{
+  dataUrl: string;
+  jpegBytes: ArrayBuffer;
+  width: number;
+  height: number;
+  timestampText: string;
+  selectedTimestampMillis: number;
+}> {
+  const {
+    sourceElement,
+    isMirroredFrontCamera,
+    settings,
+    gps,
+    defaultLogoUrl,
+    captureMillis,
+    originalExif = null,
+  } = params;
 
   const rawWidth =
     sourceElement instanceof HTMLVideoElement
@@ -772,6 +793,7 @@ export async function composeWatermarkedPhoto(params: {
     logoImg = await loadImageElement(logoSrc);
   }
 
+  const selectedTimestampMillis = resolveTimestampMillis(settings, gps, captureMillis);
   const { timestampText } = measureAndDrawWatermarkCard({
     ctx,
     containerW: targetW,
@@ -783,12 +805,31 @@ export async function composeWatermarkedPhoto(params: {
   });
 
   const qualityDecimal = Math.min(1, Math.max(0.7, settings.jpegQuality / 100));
-  const dataUrl = canvas.toDataURL('image/jpeg', qualityDecimal);
+  const rawCanvasBytes = await canvasToJpegBytes(canvas, qualityDecimal);
+
+  const exportLat = gps.hasFix ? gps.latitude : (originalExif?.latitude ?? null);
+  const exportLon = gps.hasFix ? gps.longitude : (originalExif?.longitude ?? null);
+
+  const finalExifBytes = applyExifMetadataToJpeg(rawCanvasBytes, {
+    dateTimeMillis: selectedTimestampMillis,
+    latitude: exportLat,
+    longitude: exportLon,
+    altitudeMeters: originalExif?.altitudeMeters ?? null,
+    altitudeRef: originalExif?.altitudeRef ?? null,
+    originalExif,
+    organizationName: settings.organizationName || 'SHAMAIL PERA',
+  });
+
+  const jpegBuffer = new ArrayBuffer(finalExifBytes.byteLength);
+  new Uint8Array(jpegBuffer).set(finalExifBytes);
+  const dataUrl = uint8ArrayToDataUrl(finalExifBytes, 'image/jpeg');
 
   return {
     dataUrl,
+    jpegBytes: jpegBuffer,
     width: targetW,
     height: targetH,
     timestampText,
+    selectedTimestampMillis,
   };
 }

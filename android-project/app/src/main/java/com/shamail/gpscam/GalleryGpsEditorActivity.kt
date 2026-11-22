@@ -318,6 +318,15 @@ class GalleryGpsEditorActivity : AppCompatActivity() {
                 }
             } else {
                 val exifSnap = PhotoStorageManager.readSourcePhotoExif(this@GalleryGpsEditorActivity, uri)
+                val resolvedOrigLoc = if (exifSnap.latitude != null && exifSnap.longitude != null) {
+                    runCatching {
+                        LocationInputResolver.reverseGeocodeToResult(
+                            this@GalleryGpsEditorActivity,
+                            exifSnap.latitude,
+                            exifSnap.longitude
+                        )
+                    }.getOrNull()
+                } else null
                 val decoded = PhotoStorageManager.decodeGalleryUriBitmap(
                     context = this@GalleryGpsEditorActivity,
                     sourceUri = uri,
@@ -327,6 +336,32 @@ class GalleryGpsEditorActivity : AppCompatActivity() {
                     selectedIsVideo = false
                     selectedDisplayName = dispName
                     sourceExifSnapshot = exifSnap
+                    if (exifSnap.dateTimeMillis != null) {
+                        workingConfig = workingConfig.copy(
+                            timestampMode = TimestampMode.MANUAL,
+                            manualTimestampMillis = exifSnap.dateTimeMillis
+                        )
+                        updateTimestampReadout()
+                    }
+                    if (exifSnap.latitude != null && exifSnap.longitude != null) {
+                        workingGps = GpsSnapshot(
+                            hasFix = true,
+                            latitude = exifSnap.latitude,
+                            longitude = exifSnap.longitude,
+                            accuracyMeters = 0f,
+                            gpsTimestampMillis = exifSnap.dateTimeMillis ?: System.currentTimeMillis(),
+                            city = resolvedOrigLoc?.city?.ifBlank { resolvedOrigLoc.locationTitle }
+                                ?: String.format(Locale.US, "GPS %.5f°, %.5f°", exifSnap.latitude, exifSnap.longitude),
+                            district = resolvedOrigLoc?.district.orEmpty(),
+                            province = resolvedOrigLoc?.province.orEmpty(),
+                            country = resolvedOrigLoc?.country.orEmpty(),
+                            streetAddress = resolvedOrigLoc?.fullAddress
+                                ?: String.format(Locale.US, "%.6f°, %.6f°", exifSnap.latitude, exifSnap.longitude),
+                            isOfflineAddress = resolvedOrigLoc == null,
+                            locationSource = LocationSource.LIVE_GPS
+                        )
+                        populateLocationInputsFromGps()
+                    }
                     binding.btnSaveGalleryGpsBottom.text = "Save New Watermarked Photo"
                     binding.btnGalleryPlayVideo.visibility = View.GONE
                     binding.vvGalleryVideo.visibility = View.GONE

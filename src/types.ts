@@ -1,3 +1,5 @@
+import type { ParsedExifMetadata } from './utils/jpegExif';
+
 export enum TimestampMode {
   AutoDevice = 'AUTO_DEVICE',
   GpsFix = 'GPS_FIX',
@@ -108,23 +110,42 @@ export interface WatermarkSettings {
   openEditorAfterCapture: boolean;
 }
 
+export interface OriginalPhotoRecord {
+  id: string;
+  fileName: string;
+  mimeType: string;
+  bytes: ArrayBuffer;
+  dataUrl: string;
+  byteLength: number;
+  sha256: string;
+  originalExif: ParsedExifMetadata;
+  importedAtMillis: number;
+}
+
 export interface CapturedPhoto {
   id: string;
   fileName: string;
   dataUrl: string;
+  jpegBytes?: ArrayBuffer;
+  originalPhotoId?: string;
+  originalFileName?: string;
+  originalExif?: ParsedExifMetadata;
   rawBaseDataUrl?: string;
   gpsSnapshot?: GpsData;
   width: number;
   height: number;
   capturedDeviceMillis: number;
+  selectedTimestampMillis: number;
   displayedTimestampText: string;
   isEditedTimestamp: boolean;
   timestampMode: TimestampMode;
+  settingsSnapshot?: WatermarkSettings;
   organizationName: string;
   locationHeadline: string;
   coordinatesText: string;
   accuracyMeters: number;
   isGalleryExport?: boolean;
+  exportedAtMillis?: number;
 }
 
 export interface ApkArtifactEntry {

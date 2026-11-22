@@ -26,6 +26,7 @@ import {
   CapturedPhoto,
   GpsData,
   LocationSource,
+  OriginalPhotoRecord,
   SavedLocationBookmark,
   TimestampMode,
   WatermarkPosition,
@@ -42,6 +43,17 @@ import {
   resolveTimestampMillis,
 } from '../utils/watermarkCanvas';
 import {
+  computeSha256Hex,
+  formatFileStamp,
+  parseJpegExif,
+  uint8ArrayToDataUrl,
+} from '../utils/jpegExif';
+import {
+  ensureUniqueExportFileName,
+  listOriginalPhotos,
+  saveOriginalPhoto,
+} from '../utils/photoDb';
+import {
   addSavedLocation,
   bookmarkToGpsData,
   deleteSavedLocation,
@@ -55,6 +67,7 @@ interface GalleryGpsCameraModalProps {
   initialGps: GpsData;
   defaultLogoUrl: string;
   hasMapsApiKey: boolean;
+  initialOriginalPhoto?: OriginalPhotoRecord | null;
   onCancel: () => void;
   onSaveExport: (photoRecord: CapturedPhoto, alsoDownload: boolean) => Promise<void> | void;
 }
@@ -86,35 +99,75 @@ export function GalleryGpsCameraModal({
   initialGps,
   defaultLogoUrl,
   hasMapsApiKey,
+  initialOriginalPhoto = null,
   onCancel,
   onSaveExport,
 }: GalleryGpsCameraModalProps) {
-  const [sourcePhotoUrl, setSourcePhotoUrl] = useState<string | null>(null);
+  const [originalRecord, setOriginalRecord] = useState<OriginalPhotoRecord | null>(
+    initialOriginalPhoto
+  );
+  const [sourcePhotoUrl, setSourcePhotoUrl] = useState<string | null>(
+    initialOriginalPhoto ? initialOriginalPhoto.dataUrl : null
+  );
   const [baseImg, setBaseImg] = useState<HTMLImageElement | null>(null);
   const [renderedPreview, setRenderedPreview] = useState<{
     dataUrl: string;
+    jpegBytes: ArrayBuffer;
     width: number;
     height: number;
     timestampText: string;
+    selectedTimestampMillis: number;
   } | null>(null);
 
-  const [draftSettings, setDraftSettings] = useState<WatermarkSettings>(() => ({
-    ...initialSettings,
-    showWatermark: true,
-    showAccuracy: false,
-    manualTimestampMillis:
-      initialSettings.timestampMode === TimestampMode.Manual
-        ? initialSettings.manualTimestampMillis
-        : Date.now(),
-  }));
+  const [draftSettings, setDraftSettings] = useState<WatermarkSettings>(() => {
+    const origMs = initialOriginalPhoto?.originalExif?.dateTimeMillis;
+    return {
+      ...initialSettings,
+      showWatermark: true,
+      showAccuracy: false,
+      timestampMode:
+        typeof origMs === 'number'
+          ? TimestampMode.Manual
+          : initialSettings.timestampMode,
+      manualTimestampMillis:
+        typeof origMs === 'number'
+          ? origMs
+          : initialSettings.timestampMode === TimestampMode.Manual
+            ? initialSettings.manualTimestampMillis
+            : Date.now(),
+    };
+  });
 
-  const [draftGps, setDraftGps] = useState<GpsData>(() => ({
-    ...initialGps,
-    hasFix: true,
-    accuracyMeters: 0,
-    locationSource: LocationSource.ManualMap,
-    sourceLabel: 'Selected Map Location',
-  }));
+  const [draftGps, setDraftGps] = useState<GpsData>(() => {
+    const origExif = initialOriginalPhoto?.originalExif;
+    if (
+      origExif &&
+      typeof origExif.latitude === 'number' &&
+      typeof origExif.longitude === 'number'
+    ) {
+      return {
+        ...initialGps,
+        hasFix: true,
+        latitude: origExif.latitude,
+        longitude: origExif.longitude,
+        accuracyMeters: 0,
+        city: `GPS ${origExif.latitude.toFixed(5)}°, ${origExif.longitude.toFixed(5)}°`,
+        district: '',
+        province: '',
+        country: '',
+        streetAddress: `${origExif.latitude.toFixed(6)}°, ${origExif.longitude.toFixed(6)}°`,
+        locationSource: LocationSource.ManualMap,
+        sourceLabel: 'Photo EXIF GPS',
+      };
+    }
+    return {
+      ...initialGps,
+      hasFix: true,
+      accuracyMeters: 0,
+      locationSource: LocationSource.ManualMap,
+      sourceLabel: 'Selected Map Location',
+    };
+  });
 
   const [locationTab, setLocationTab] = useState<'map' | 'saved'>('map');
   const [savedLocations, setSavedLocations] = useState<SavedLocationBookmark[]>(() =>
@@ -126,10 +179,12 @@ export function GalleryGpsCameraModal({
   const [newBookmarkLabel, setNewBookmarkLabel] = useState('');
   const [bookmarkFeedback, setBookmarkFeedback] = useState<string | null>(null);
 
-  const [headlineInput, setHeadlineInput] = useState(() => buildLocationHeadline(initialGps));
-  const [addressInput, setAddressInput] = useState(() => initialGps.streetAddress || '');
-  const [latInput, setLatInput] = useState(() => initialGps.latitude.toFixed(6));
-  const [lonInput, setLonInput] = useState(() => initialGps.longitude.toFixed(6));
+  const [headlineInput, setHeadlineInput] = useState(() =>
+    buildLocationHeadline(draftGps)
+  );
+  const [addressInput, setAddressInput] = useState(() => draftGps.streetAddress || '');
+  const [latInput, setLatInput] = useState(() => draftGps.latitude.toFixed(6));
+  const [lonInput, setLonInput] = useState(() => draftGps.longitude.toFixed(6));
 
   const [placeQuery, setPlaceQuery] = useState('');
   const [placeSuggestions, setPlaceSuggestions] = useState<PlacePredictionOption[]>([]);
@@ -142,17 +197,79 @@ export function GalleryGpsCameraModal({
   const geocodingLib = useMapsLibrary('geocoding');
   const sessionTokenRef = useRef<PlacesSessionTokenLike | null>(null);
 
-  // Load selected gallery photo in read-only mode
-  const handleSelectGalleryFile = (e: ChangeEvent<HTMLInputElement>) => {
+  // Load selected gallery photo in strict read-only mode and preserve untouched original bytes
+  const handleSelectGalleryFile = async (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      if (typeof reader.result === 'string') {
-        setSourcePhotoUrl(reader.result);
-      }
+    const rawBuffer = await file.arrayBuffer();
+    const rawBytes = new Uint8Array(rawBuffer);
+    const sha256 = await computeSha256Hex(rawBytes);
+    const parsedExif = parseJpegExif(rawBytes);
+    const originalDataUrl = uint8ArrayToDataUrl(rawBytes, file.type || 'image/jpeg');
+
+    const existingOriginals = await listOriginalPhotos().catch(() => [] as OriginalPhotoRecord[]);
+    const matched = existingOriginals.find(
+      (o) => o.sha256 === sha256 && o.fileName === file.name
+    );
+
+    const preservedOriginal: OriginalPhotoRecord = matched ?? {
+      id: `orig_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+      fileName: file.name,
+      mimeType: file.type || 'image/jpeg',
+      bytes: rawBuffer.slice(0),
+      dataUrl: originalDataUrl,
+      byteLength: rawBytes.byteLength,
+      sha256,
+      originalExif: parsedExif,
+      importedAtMillis: Date.now(),
     };
-    reader.readAsDataURL(file);
+
+    if (!matched) {
+      await saveOriginalPhoto(preservedOriginal).catch(() => {});
+    }
+
+    setOriginalRecord(preservedOriginal);
+    setSourcePhotoUrl(preservedOriginal.dataUrl);
+
+    if (typeof parsedExif.dateTimeMillis === 'number') {
+      setDraftSettings((prev) => ({
+        ...prev,
+        timestampMode: TimestampMode.Manual,
+        manualTimestampMillis: parsedExif.dateTimeMillis!,
+      }));
+    }
+
+    if (
+      typeof parsedExif.latitude === 'number' &&
+      typeof parsedExif.longitude === 'number'
+    ) {
+      const lat = parsedExif.latitude;
+      const lon = parsedExif.longitude;
+      const coordsHeadline = `GPS ${lat.toFixed(5)}°, ${lon.toFixed(5)}°`;
+      const coordsAddr = `${lat.toFixed(6)}°, ${lon.toFixed(6)}°`;
+      setLatInput(lat.toFixed(6));
+      setLonInput(lon.toFixed(6));
+      setHeadlineInput(coordsHeadline);
+      setAddressInput(coordsAddr);
+      setDraftGps((prev) => ({
+        ...prev,
+        hasFix: true,
+        latitude: lat,
+        longitude: lon,
+        city: coordsHeadline,
+        district: '',
+        province: '',
+        country: '',
+        streetAddress: coordsAddr,
+        isOfflineAddress: false,
+        locationSource: LocationSource.ManualMap,
+        sourceLabel: 'Photo EXIF GPS',
+      }));
+      if (map) {
+        map.panTo({ lat, lng: lon });
+      }
+      reverseGeocodeMapPin(lat, lon);
+    }
   };
 
   useEffect(() => {
@@ -170,7 +287,7 @@ export function GalleryGpsCameraModal({
     };
   }, [sourcePhotoUrl]);
 
-  // Live watermark composition
+  // Live watermark composition (always outputs EXIF-updated JPEG)
   useEffect(() => {
     if (!baseImg) return;
     let active = true;
@@ -181,6 +298,7 @@ export function GalleryGpsCameraModal({
       gps: draftGps,
       defaultLogoUrl,
       captureMillis: Date.now(),
+      originalExif: originalRecord?.originalExif || null,
     })
       .then((res) => {
         if (active) setRenderedPreview(res);
@@ -189,7 +307,7 @@ export function GalleryGpsCameraModal({
     return () => {
       active = false;
     };
-  }, [baseImg, draftSettings, draftGps, defaultLogoUrl]);
+  }, [baseImg, draftSettings, draftGps, defaultLogoUrl, originalRecord]);
 
   // Reverse geocode clicked map coordinates via Google Maps Geocoder
   const reverseGeocodeMapPin = useCallback(
@@ -245,6 +363,20 @@ export function GalleryGpsCameraModal({
     },
     [geocodingLib]
   );
+
+  useEffect(() => {
+    const origExif = initialOriginalPhoto?.originalExif;
+    if (
+      origExif &&
+      typeof origExif.latitude === 'number' &&
+      typeof origExif.longitude === 'number'
+    ) {
+      if (map) {
+        map.panTo({ lat: origExif.latitude, lng: origExif.longitude });
+      }
+      reverseGeocodeMapPin(origExif.latitude, origExif.longitude);
+    }
+  }, [initialOriginalPhoto, map, reverseGeocodeMapPin]);
 
   const handleMapClick = (ev: MapMouseEvent) => {
     const latLng = ev.detail.latLng;
@@ -427,41 +559,44 @@ export function GalleryGpsCameraModal({
     setSaving(true);
     try {
       const exportMoment = Date.now();
-      const composed =
-        renderedPreview ||
-        (await composeWatermarkedPhoto({
-          sourceElement: baseImg,
-          isMirroredFrontCamera: false,
-          settings: draftSettings,
-          gps: draftGps,
-          defaultLogoUrl,
-          captureMillis: exportMoment,
-        }));
+      const origExif = originalRecord?.originalExif || null;
+      const composed = await composeWatermarkedPhoto({
+        sourceElement: baseImg,
+        isMirroredFrontCamera: false,
+        settings: draftSettings,
+        gps: draftGps,
+        defaultLogoUrl,
+        captureMillis: exportMoment,
+        originalExif: origExif,
+      });
 
-      const d = new Date(exportMoment);
-      const stamp = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(
-        d.getDate()
-      ).padStart(2, '0')}_${String(d.getHours()).padStart(2, '0')}${String(
-        d.getMinutes()
-      ).padStart(2, '0')}${String(d.getSeconds()).padStart(2, '0')}`;
+      const stamp = formatFileStamp(composed.selectedTimestampMillis);
+      const uniqueFileName = await ensureUniqueExportFileName(`SHAMAIL_GPS_${stamp}.jpg`);
 
       const record: CapturedPhoto = {
-        id: `gallery_gps_${exportMoment}`,
-        fileName: `SHAMAIL_GALLERY_GPS_${stamp}.jpg`,
+        id: `gallery_gps_${exportMoment}_${Math.random().toString(36).slice(2, 7)}`,
+        fileName: uniqueFileName,
         dataUrl: composed.dataUrl,
-        rawBaseDataUrl: sourcePhotoUrl || undefined,
+        jpegBytes: composed.jpegBytes,
+        originalPhotoId: originalRecord?.id,
+        originalFileName: originalRecord?.fileName,
+        originalExif: origExif || undefined,
+        rawBaseDataUrl: originalRecord?.dataUrl || sourcePhotoUrl || undefined,
         gpsSnapshot: draftGps,
         width: composed.width,
         height: composed.height,
-        capturedDeviceMillis: exportMoment,
+        capturedDeviceMillis: origExif?.dateTimeMillis ?? exportMoment,
+        selectedTimestampMillis: composed.selectedTimestampMillis,
         displayedTimestampText: composed.timestampText,
         isEditedTimestamp: draftSettings.timestampMode === TimestampMode.Manual,
         timestampMode: draftSettings.timestampMode,
+        settingsSnapshot: { ...draftSettings },
         organizationName: draftSettings.organizationName || 'SHAMAIL PERA',
         locationHeadline: buildLocationHeadline(draftGps),
         coordinatesText: formatWatermarkCoordinates(draftSettings, draftGps),
         accuracyMeters: draftGps.accuracyMeters,
         isGalleryExport: true,
+        exportedAtMillis: exportMoment,
       };
 
       await onSaveExport(record, alsoDownload);
@@ -499,7 +634,13 @@ export function GalleryGpsCameraModal({
                 Gallery GPS Camera — Stamp Existing Gallery Photo
               </h2>
               <p className="text-[11px] text-slate-400 truncate">
-                Editor Source: {draftGps.sourceLabel} · Original photo is never modified
+                {originalRecord
+                  ? `Original preserved (${originalRecord.fileName})${
+                      originalRecord.originalExif?.dateTimeOriginal
+                        ? ` · Source EXIF: ${originalRecord.originalExif.dateTimeOriginal}`
+                        : ''
+                    }`
+                  : `Editor Source: ${draftGps.sourceLabel} · Original photo is never modified`}
               </p>
             </div>
           </div>

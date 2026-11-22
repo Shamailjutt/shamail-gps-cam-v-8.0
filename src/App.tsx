@@ -25,6 +25,7 @@ import {
   FlashMode,
   GpsData,
   LocationSource,
+  OriginalPhotoRecord,
   ResolutionPreset,
   TimestampMode,
   WatermarkPosition,
@@ -39,9 +40,14 @@ import {
   composeWatermarkedPhoto,
   formatWatermarkCoordinates,
 } from './utils/watermarkCanvas';
+import { formatFileStamp } from './utils/jpegExif';
 import {
   deleteCapturedPhoto,
+  deleteOriginalPhoto,
+  ensureUniqueExportFileName,
+  getOriginalPhoto,
   listCapturedPhotos,
+  listOriginalPhotos,
   saveCapturedPhoto,
   triggerPhotoDownload,
 } from './utils/photoDb';
@@ -162,13 +168,17 @@ function GpsCameraWorkspace() {
 
   const [showSequentialDateModal, setShowSequentialDateModal] = useState<boolean>(false);
   const [showGalleryGpsModal, setShowGalleryGpsModal] = useState<boolean>(false);
+  const [editingOriginalPhoto, setEditingOriginalPhoto] =
+    useState<OriginalPhotoRecord | null>(null);
   const [pendingCapture, setPendingCapture] = useState<{
     rawBaseDataUrl: string;
     captureMillis: number;
     existingPhoto: CapturedPhoto | null;
+    originalPhoto: OriginalPhotoRecord | null;
   } | null>(null);
 
   const [photos, setPhotos] = useState<CapturedPhoto[]>([]);
+  const [originals, setOriginals] = useState<OriginalPhotoRecord[]>([]);
   const [quotaExceeded, setQuotaExceeded] = useState<boolean>(false);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -203,8 +213,12 @@ function GpsCameraWorkspace() {
 
   const refreshGallery = useCallback(async () => {
     try {
-      const saved = await listCapturedPhotos();
-      setPhotos(saved);
+      const [savedPhotos, savedOriginals] = await Promise.all([
+        listCapturedPhotos(),
+        listOriginalPhotos(),
+      ]);
+      setPhotos(savedPhotos);
+      setOriginals(savedOriginals);
     } catch {
       // Ignore IndexedDB restriction
     }
@@ -446,6 +460,7 @@ function GpsCameraWorkspace() {
           rawBaseDataUrl: raw.rawBaseDataUrl,
           captureMillis: captureMoment,
           existingPhoto: null,
+          originalPhoto: null,
         });
       } else {
         const raw = captureRawBasePhoto({
@@ -462,29 +477,29 @@ function GpsCameraWorkspace() {
           defaultLogoUrl: defaultEmblemUrl,
           captureMillis: captureMoment,
         });
-        const d = new Date(captureMoment);
-        const stampId = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(
-          d.getDate()
-        ).padStart(2, '0')}_${String(d.getHours()).padStart(2, '0')}${String(
-          d.getMinutes()
-        ).padStart(2, '0')}${String(d.getSeconds()).padStart(2, '0')}`;
+        const stampId = formatFileStamp(composed.selectedTimestampMillis);
+        const uniqueFileName = await ensureUniqueExportFileName(`SHAMAIL_GPS_${stampId}.jpg`);
 
         const record: CapturedPhoto = {
-          id: `photo_${captureMoment}`,
-          fileName: `SHAMAIL_GPS_${stampId}.jpg`,
+          id: `photo_${captureMoment}_${Math.random().toString(36).slice(2, 7)}`,
+          fileName: uniqueFileName,
           dataUrl: composed.dataUrl,
+          jpegBytes: composed.jpegBytes,
           rawBaseDataUrl: raw.rawBaseDataUrl,
           gpsSnapshot: gps,
           width: composed.width,
           height: composed.height,
           capturedDeviceMillis: captureMoment,
+          selectedTimestampMillis: composed.selectedTimestampMillis,
           displayedTimestampText: composed.timestampText,
           isEditedTimestamp: settings.timestampMode === TimestampMode.Manual,
           timestampMode: settings.timestampMode,
+          settingsSnapshot: { ...settings },
           organizationName: settings.organizationName || 'SHAMAIL PERA',
           locationHeadline: buildLocationHeadline(gps),
           coordinatesText: formatWatermarkCoordinates(settings, gps),
           accuracyMeters: gps.accuracyMeters,
+          exportedAtMillis: captureMoment,
         };
         await saveCapturedPhoto(record);
         await refreshGallery();
@@ -495,12 +510,22 @@ function GpsCameraWorkspace() {
     }
   };
 
-  const handleOpenPhotoEditor = (photo: CapturedPhoto) => {
+  const handleOpenPhotoEditor = async (photo: CapturedPhoto) => {
+    let original: OriginalPhotoRecord | null = null;
+    if (photo.originalPhotoId) {
+      original = await getOriginalPhoto(photo.originalPhotoId).catch(() => null);
+    }
     setPendingCapture({
-      rawBaseDataUrl: photo.rawBaseDataUrl || photo.dataUrl,
+      rawBaseDataUrl: original?.dataUrl || photo.rawBaseDataUrl || photo.dataUrl,
       captureMillis: photo.capturedDeviceMillis,
       existingPhoto: photo,
+      originalPhoto: original,
     });
+  };
+
+  const handleOpenOriginalInEditor = (original: OriginalPhotoRecord) => {
+    setEditingOriginalPhoto(original);
+    setShowGalleryGpsModal(true);
   };
 
   const handleSaveEditedCapture = async (
@@ -528,6 +553,7 @@ function GpsCameraWorkspace() {
     await refreshGallery();
     setCaptureNotice(photoRecord);
     setShowGalleryGpsModal(false);
+    setEditingOriginalPhoto(null);
     if (alsoDownload) {
       triggerPhotoDownload(photoRecord);
     }
@@ -536,6 +562,11 @@ function GpsCameraWorkspace() {
   const handleDeletePhoto = async (id: string) => {
     await deleteCapturedPhoto(id);
     if (captureNotice?.id === id) setCaptureNotice(null);
+    await refreshGallery();
+  };
+
+  const handleDeleteOriginal = async (id: string) => {
+    await deleteOriginalPhoto(id);
     await refreshGallery();
   };
 
@@ -1008,9 +1039,15 @@ function GpsCameraWorkspace() {
         {activeTab === 'gallery' && (
           <GalleryView
             photos={photos}
+            originals={originals}
             onDelete={handleDeletePhoto}
             onEditPhoto={handleOpenPhotoEditor}
-            onOpenGalleryGps={() => setShowGalleryGpsModal(true)}
+            onEditOriginal={handleOpenOriginalInEditor}
+            onDeleteOriginal={handleDeleteOriginal}
+            onOpenGalleryGps={() => {
+              setEditingOriginalPhoto(null);
+              setShowGalleryGpsModal(true);
+            }}
             onReturnToCamera={() => handleSelectTab('camera')}
           />
         )}
@@ -1033,7 +1070,10 @@ function GpsCameraWorkspace() {
                 setSettingsUnlocked(false);
                 setActiveTab('camera');
               }}
-              onOpenGalleryGps={() => setShowGalleryGpsModal(true)}
+              onOpenGalleryGps={() => {
+                setEditingOriginalPhoto(null);
+                setShowGalleryGpsModal(true);
+              }}
               onChange={updateSettings}
             />
           ) : (
@@ -1059,6 +1099,7 @@ function GpsCameraWorkspace() {
           captureMillis={pendingCapture.captureMillis}
           defaultLogoUrl={defaultEmblemUrl}
           existingPhoto={pendingCapture.existingPhoto}
+          originalPhoto={pendingCapture.originalPhoto}
           onCancel={() => setPendingCapture(null)}
           onSave={handleSaveEditedCapture}
         />
@@ -1071,7 +1112,11 @@ function GpsCameraWorkspace() {
           initialGps={gps}
           defaultLogoUrl={defaultEmblemUrl}
           hasMapsApiKey={Boolean(MAPS_API_KEY)}
-          onCancel={() => setShowGalleryGpsModal(false)}
+          initialOriginalPhoto={editingOriginalPhoto}
+          onCancel={() => {
+            setShowGalleryGpsModal(false);
+            setEditingOriginalPhoto(null);
+          }}
           onSaveExport={handleSaveGalleryGpsExport}
         />
       )}
