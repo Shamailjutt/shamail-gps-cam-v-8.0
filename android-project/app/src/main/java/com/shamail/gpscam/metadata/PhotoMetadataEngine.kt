@@ -73,6 +73,8 @@ object PhotoMetadataEngine {
 
     private const val TAG = "ShamailMeta"
 
+    const val ARTIST_NAME = "SHAMAIL AHMED RANDHAWA (JUTT) ❤️✨"
+    const val SOFTWARE_NAME = "GPS CAM BY SHAMAIL v8.0"
     const val IMAGE_DESCRIPTION = "SHAMAIL PERA | VERIFIED_DEVICE_CAPTURE"
     const val USER_COMMENT = "VERIFIED_DEVICE_CAPTURE"
 
@@ -274,6 +276,8 @@ object PhotoMetadataEngine {
                 exif.setAttribute(ExifInterface.TAG_GPS_TIMESTAMP, gpsTime)
             }
 
+            exif.setAttribute(ExifInterface.TAG_ARTIST, ARTIST_NAME)
+            exif.setAttribute(ExifInterface.TAG_SOFTWARE, SOFTWARE_NAME)
             exif.setAttribute(ExifInterface.TAG_IMAGE_DESCRIPTION, IMAGE_DESCRIPTION)
             exif.setAttribute(ExifInterface.TAG_USER_COMMENT, USER_COMMENT)
 

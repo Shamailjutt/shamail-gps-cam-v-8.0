@@ -1233,7 +1233,7 @@ object PhotoStorageManager {
 
     private fun applyPreservedHardwareExif(
         exif: ExifInterface,
-        config: WatermarkConfig,
+        @Suppress("UNUSED_PARAMETER") config: WatermarkConfig,
         originalExif: SourceExifSnapshot?,
         exportedGps: GpsSnapshot,
         isGalleryImport: Boolean
@@ -1259,8 +1259,8 @@ object PhotoStorageManager {
             )
         }
 
-        exif.setAttribute(ExifInterface.TAG_SOFTWARE, "Gps cam by shamail v2.0.0")
-        exif.setAttribute(ExifInterface.TAG_ARTIST, config.organizationName)
+        exif.setAttribute(ExifInterface.TAG_SOFTWARE, PhotoMetadataEngine.SOFTWARE_NAME)
+        exif.setAttribute(ExifInterface.TAG_ARTIST, PhotoMetadataEngine.ARTIST_NAME)
     }
 
     fun listSavedPhotos(context: Context): List<SavedPhotoItem> {
