@@ -114,14 +114,18 @@ object SequentialDateTimePicker {
             baseCal.set(Calendar.HOUR_OF_DAY, timePicker.hour)
             baseCal.set(Calendar.MINUTE, timePicker.minute)
             baseCal.set(Calendar.SECOND, 0)
+            baseCal.set(Calendar.MILLISECOND, 0)
             val candidateMillis = baseCal.timeInMillis
 
+            val tz = TimeZone.getDefault()
             val timePattern = if (is24HourFormat) "HH:mm:ss" else "hh:mm:ss a"
             val formattedPreview = runCatching {
                 SimpleDateFormat("$dateFormatPattern, $timePattern", Locale.US)
+                    .apply { timeZone = tz }
                     .format(Date(candidateMillis))
             }.getOrElse {
                 SimpleDateFormat("dd MMM yyyy, hh:mm:ss a", Locale.US)
+                    .apply { timeZone = tz }
                     .format(Date(candidateMillis))
             }
 

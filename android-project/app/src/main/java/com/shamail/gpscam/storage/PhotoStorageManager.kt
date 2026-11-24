@@ -39,6 +39,8 @@ import java.io.FileOutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import kotlin.math.abs
 import kotlin.math.max
 
@@ -272,7 +274,14 @@ object PhotoStorageManager {
             val dtOrig = exif.getAttribute(ExifInterface.TAG_DATETIME_ORIGINAL)
             val dtDig = exif.getAttribute(ExifInterface.TAG_DATETIME_DIGITIZED)
             val dt = exif.getAttribute(ExifInterface.TAG_DATETIME)
-            val dtMillis = parseExifDateTime(dtOrig ?: dtDig ?: dt)
+            val offsetOrig = exif.getAttribute(ExifInterface.TAG_OFFSET_TIME_ORIGINAL)
+            val offsetDig = exif.getAttribute(ExifInterface.TAG_OFFSET_TIME_DIGITIZED)
+            val offsetDt = exif.getAttribute(ExifInterface.TAG_OFFSET_TIME)
+            val dtMillis = when {
+                !dtOrig.isNullOrBlank() -> PhotoMetadataEngine.parseExifTimestampMillis(dtOrig, offsetOrig)
+                !dtDig.isNullOrBlank() -> PhotoMetadataEngine.parseExifTimestampMillis(dtDig, offsetDig)
+                else -> PhotoMetadataEngine.parseExifTimestampMillis(dt, offsetDt)
+            } ?: PhotoMetadataEngine.parseExifTimestampMillis(dtOrig ?: dtDig ?: dt)
             val coords = exif.latLong
 
             SourceExifSnapshot(
@@ -309,14 +318,16 @@ object PhotoStorageManager {
         originalSourceExif: SourceExifSnapshot? = null,
         sourceDisplayName: String? = null
     ): Uri? {
-        val displayedMillis = config.resolveTimestampMillis(gps, captureDeviceMillis)
+        val displayedMillis = PhotoMetadataEngine.normalizeToSecondMillis(
+            config.resolveTimestampMillis(gps, captureDeviceMillis)
+        )
         val logoBitmap = WatermarkRenderer.loadLogoBitmap(context, config)
         val watermarked = WatermarkRenderer.renderOntoBitmap(
             source = sourceBitmap,
             config = config,
             gps = gps,
             logoBitmap = logoBitmap,
-            captureMillis = captureDeviceMillis
+            captureMillis = displayedMillis
         )
 
         val fileStamp = PhotoMetadataEngine.formatFileStamp(displayedMillis)
@@ -593,9 +604,10 @@ object PhotoStorageManager {
         dateFormatPattern: String,
         editedGps: GpsSnapshot = editable.gps
     ): Pair<Uri, String>? {
+        val normalizedEditedMillis = PhotoMetadataEngine.normalizeToSecondMillis(editedMillis)
         val updatedConfig = editable.config.copy(
             timestampMode = TimestampMode.MANUAL,
-            manualTimestampMillis = editedMillis,
+            manualTimestampMillis = normalizedEditedMillis,
             is24HourFormat = is24HourFormat,
             dateFormatPattern = dateFormatPattern,
             showWatermark = true
@@ -608,7 +620,7 @@ object PhotoStorageManager {
                 source = editable.sourceBitmap,
                 config = updatedConfig,
                 oldGps = editable.gps,
-                captureMillis = editedMillis
+                captureMillis = normalizedEditedMillis
             )
         }
         val watermarked = WatermarkRenderer.renderOntoBitmap(
@@ -616,12 +628,12 @@ object PhotoStorageManager {
             config = updatedConfig,
             gps = editedGps,
             logoBitmap = logoBitmap,
-            captureMillis = editedMillis,
+            captureMillis = normalizedEditedMillis,
             forceOpaqueBackground = false,
             replaceExistingWatermark = false
         )
 
-        val stamp = PhotoMetadataEngine.formatFileStamp(editedMillis)
+        val stamp = PhotoMetadataEngine.formatFileStamp(normalizedEditedMillis)
         val fileName = ensureUniqueOutputFileName(context, "SHAMAIL_GPS_$stamp.jpg")
         val quality = updatedConfig.jpegQuality.coerceIn(70, 100)
 
@@ -653,7 +665,7 @@ object PhotoStorageManager {
             config = updatedConfig,
             originalExif = editable.sourceExif,
             exportedGps = exportedGps,
-            displayedMillis = editedMillis,
+            displayedMillis = normalizedEditedMillis,
             isGalleryImport = false
         )
 
@@ -664,7 +676,7 @@ object PhotoStorageManager {
                 cleanSourceBitmap = cleanBaseForCopy,
                 config = updatedConfig,
                 gps = editedGps,
-                displayMillis = editedMillis,
+                displayMillis = normalizedEditedMillis,
                 originalCaptureMillis = editable.originalCaptureMillis
             )
 
@@ -675,8 +687,9 @@ object PhotoStorageManager {
                 historyEntries.addAll(prevRecord.history)
             }
 
-            val hasTimestampChange = abs(editedMillis - editable.originalDisplayMillis) > 1000L ||
-                abs(editedMillis - editable.originalCaptureMillis) > 60_000L
+            val normOrigDisplay = PhotoMetadataEngine.normalizeToSecondMillis(editable.originalDisplayMillis)
+            val hasTimestampChange = abs(normalizedEditedMillis - normOrigDisplay) >= 1000L ||
+                abs(normalizedEditedMillis - editable.originalCaptureMillis) > 60_000L
             val hasLocationChange = editedGps.locationSource != LocationSource.LIVE_GPS ||
                 editedGps.buildLocationHeadline() != editable.gps.buildLocationHeadline() ||
                 editedGps.streetAddress != editable.gps.streetAddress ||
@@ -694,7 +707,7 @@ object PhotoStorageManager {
                     recordedAtMillis = System.currentTimeMillis(),
                     actionLabel = actionLabel,
                     sourcePhotoName = editable.originalSourceName,
-                    customDateTimeMillis = editedMillis,
+                    customDateTimeMillis = normalizedEditedMillis,
                     customLocationTitle = if (editedGps.hasFix) editedGps.buildLocationHeadline() else "",
                     customAddress = if (editedGps.hasFix) editedGps.buildFullAddressLine() else "",
                     customLat = if (editedGps.hasFix) editedGps.latitude else null,
@@ -724,7 +737,7 @@ object PhotoStorageManager {
                         editable.gps.buildFullAddressLine()
                     } else null,
                 cameraInfo = prevRecord?.cameraInfo ?: makeModel,
-                watermarkDateTimeMillis = editedMillis,
+                watermarkDateTimeMillis = normalizedEditedMillis,
                 watermarkLocationTitle = if (editedGps.hasFix) editedGps.buildLocationHeadline() else "",
                 watermarkAddress = if (editedGps.hasFix) editedGps.buildFullAddressLine() else "",
                 watermarkLatitude = if (editedGps.hasFix) editedGps.latitude else null,
@@ -788,6 +801,13 @@ object PhotoStorageManager {
         )
     }
 
+    private data class MediaStoreRowInfo(
+        val dataPath: String?,
+        val dateTakenMillis: Long?,
+        val dateModifiedSec: Long?,
+        val dateAddedSec: Long?
+    )
+
     private fun exportWatermarkedPhoto(
         context: Context,
         watermarkedBitmap: Bitmap,
@@ -799,6 +819,7 @@ object PhotoStorageManager {
         displayedMillis: Long,
         isGalleryImport: Boolean
     ): Uri? {
+        val targetMillis = PhotoMetadataEngine.normalizeToSecondMillis(displayedMillis)
         val tempFile = File(context.cacheDir, "shamail_export_${System.nanoTime()}.jpg")
         return try {
             FileOutputStream(tempFile).use { out ->
@@ -823,26 +844,27 @@ object PhotoStorageManager {
 
             val metaApplied = PhotoMetadataEngine.applyShamailMetadata(
                 filePath = tempFile.absolutePath,
-                dateTimeMillis = displayedMillis,
+                dateTimeMillis = targetMillis,
                 latitude = exportedLat,
                 longitude = exportedLon
             )
             if (!metaApplied) {
                 Log.w("ShamailMeta", "applyShamailMetadata returned false for $fileName")
             }
+            PhotoMetadataEngine.syncImageTimestamps(tempFile, targetMillis, context)
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 val savedUri = saveViaMediaStoreQ(
                     context = context,
                     preparedJpegFile = tempFile,
                     fileName = fileName,
-                    displayedMillis = displayedMillis
+                    displayedMillis = targetMillis
                 )
                 if (savedUri != null) {
                     verifySavedMediaStorePhoto(
                         context = context,
                         savedUri = savedUri,
-                        expectedMillis = displayedMillis,
+                        expectedMillis = targetMillis,
                         expectedLat = exportedLat,
                         expectedLon = exportedLon,
                         expectedFileName = fileName
@@ -854,19 +876,25 @@ object PhotoStorageManager {
                     context = context,
                     preparedJpegFile = tempFile,
                     fileName = fileName,
-                    displayedMillis = displayedMillis
+                    displayedMillis = targetMillis
                 ) ?: return null
 
-                PhotoMetadataEngine.verifyExportedMetadata(
+                val mediaUri = queryExistingMediaUriByPath(context, savedResult.second.absolutePath)
+                val rowInfo = mediaUri?.let { queryMediaStoreRowInfo(context, it) }
+                PhotoMetadataEngine.verifyExportedMetadataDetailed(
                     filePath = savedResult.second.absolutePath,
-                    expectedMillis = displayedMillis,
+                    expectedMillis = targetMillis,
                     expectedLat = exportedLat,
                     expectedLon = exportedLon,
-                    expectedFileName = fileName
+                    expectedFileName = fileName,
+                    checkFilesystemMtime = true,
+                    mediaStoreDateTakenMillis = rowInfo?.dateTakenMillis,
+                    mediaStoreDateModifiedSec = rowInfo?.dateModifiedSec
                 )
                 savedResult.first
             }
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            Log.e("ShamailMeta", "exportWatermarkedPhoto failed for $fileName: ${e.message}", e)
             null
         } finally {
             if (tempFile.exists()) {
@@ -883,6 +911,22 @@ object PhotoStorageManager {
         expectedLon: Double?,
         expectedFileName: String
     ) {
+        val rowInfo = queryMediaStoreRowInfo(context, savedUri)
+        val resolvedDataFile = rowInfo?.dataPath?.let { File(it) }?.takeIf { it.exists() && it.canRead() }
+        if (resolvedDataFile != null) {
+            PhotoMetadataEngine.verifyExportedMetadataDetailed(
+                filePath = resolvedDataFile.absolutePath,
+                expectedMillis = expectedMillis,
+                expectedLat = expectedLat,
+                expectedLon = expectedLon,
+                expectedFileName = expectedFileName,
+                checkFilesystemMtime = true,
+                mediaStoreDateTakenMillis = rowInfo.dateTakenMillis,
+                mediaStoreDateModifiedSec = rowInfo.dateModifiedSec
+            )
+            return
+        }
+
         val verifyTemp = File(context.cacheDir, "shamail_verify_${System.nanoTime()}.jpg")
         try {
             context.contentResolver.openInputStream(savedUri)?.use { input ->
@@ -891,12 +935,15 @@ object PhotoStorageManager {
                 }
             }
             if (verifyTemp.exists() && verifyTemp.length() > 0L) {
-                PhotoMetadataEngine.verifyExportedMetadata(
+                PhotoMetadataEngine.verifyExportedMetadataDetailed(
                     filePath = verifyTemp.absolutePath,
                     expectedMillis = expectedMillis,
                     expectedLat = expectedLat,
                     expectedLon = expectedLon,
-                    expectedFileName = expectedFileName
+                    expectedFileName = expectedFileName,
+                    checkFilesystemMtime = false,
+                    mediaStoreDateTakenMillis = rowInfo?.dateTakenMillis,
+                    mediaStoreDateModifiedSec = rowInfo?.dateModifiedSec
                 )
             } else {
                 Log.i("ShamailMeta", "VERIFY FAIL [$expectedFileName]: could not read back saved MediaStore stream")
@@ -916,13 +963,14 @@ object PhotoStorageManager {
         fileName: String,
         displayedMillis: Long
     ): Uri? {
+        val targetMillis = PhotoMetadataEngine.normalizeToSecondMillis(displayedMillis)
+        val timeSec = (targetMillis / 1000L).coerceAtLeast(1L)
         val resolver = context.contentResolver
-        val timeSec = (displayedMillis / 1000L).coerceAtLeast(1L)
         val values = ContentValues().apply {
             put(MediaStore.Images.Media.DISPLAY_NAME, fileName)
             put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
             put(MediaStore.Images.Media.RELATIVE_PATH, "${Environment.DIRECTORY_PICTURES}/$SUBFOLDER_NAME")
-            put(MediaStore.Images.Media.DATE_TAKEN, displayedMillis)
+            put(MediaStore.Images.Media.DATE_TAKEN, targetMillis)
             put(MediaStore.Images.Media.DATE_ADDED, timeSec)
             put(MediaStore.Images.Media.DATE_MODIFIED, timeSec)
             put(MediaStore.Images.Media.IS_PENDING, 1)
@@ -933,19 +981,41 @@ object PhotoStorageManager {
             resolver.openOutputStream(uri)?.use { out ->
                 preparedJpegFile.inputStream().use { input ->
                     input.copyTo(out)
+                    out.flush()
                 }
             } ?: run {
                 runCatching { resolver.delete(uri, null, null) }
                 return null
             }
+
+            // Try syncing pending file mtime before clearing IS_PENDING where FUSE allows it
+            queryMediaStoreRowInfo(context, uri)?.dataPath?.let { pendingPath ->
+                val pendingFile = File(pendingPath)
+                if (pendingFile.exists()) {
+                    PhotoMetadataEngine.syncImageTimestamps(pendingFile, targetMillis, context)
+                }
+            }
+
             val doneValues = ContentValues().apply {
                 put(MediaStore.Images.Media.IS_PENDING, 0)
-                put(MediaStore.Images.Media.DATE_TAKEN, displayedMillis)
+                put(MediaStore.Images.Media.DATE_TAKEN, targetMillis)
+                put(MediaStore.Images.Media.DATE_ADDED, timeSec)
                 put(MediaStore.Images.Media.DATE_MODIFIED, timeSec)
             }
-            resolver.update(uri, doneValues, null, null)
+            val updatedRows = runCatching { resolver.update(uri, doneValues, null, null) }.getOrDefault(0)
+            if (updatedRows == 0) {
+                val minimalDone = ContentValues().apply {
+                    put(MediaStore.Images.Media.IS_PENDING, 0)
+                }
+                runCatching { resolver.update(uri, minimalDone, null, null) }
+            }
+
+            // Re-sync underlying physical file mtime and MediaStore columns AFTER IS_PENDING=0 scan completes
+            val finalPath = queryMediaStoreRowInfo(context, uri)?.dataPath
+            syncMediaStoreImageTimestamps(context, uri, finalPath, targetMillis)
             uri
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            Log.e("ShamailMeta", "saveViaMediaStoreQ failed for $fileName: ${e.message}", e)
             runCatching { resolver.delete(uri, null, null) }
             null
         }
@@ -957,6 +1027,7 @@ object PhotoStorageManager {
         fileName: String,
         displayedMillis: Long
     ): Pair<Uri, File>? {
+        val targetMillis = PhotoMetadataEngine.normalizeToSecondMillis(displayedMillis)
         return try {
             @Suppress("DEPRECATION")
             val picturesRoot = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES)
@@ -965,14 +1036,16 @@ object PhotoStorageManager {
 
             val outFile = File(targetDir, fileName)
             preparedJpegFile.copyTo(outFile, overwrite = true)
-            outFile.setLastModified(displayedMillis)
+            PhotoMetadataEngine.syncImageTimestamps(outFile, targetMillis, context)
 
-            MediaScannerConnection.scanFile(
-                context,
-                arrayOf(outFile.absolutePath),
-                arrayOf("image/jpeg"),
-                null
-            )
+            val scannedUri = scanImageFileAndAwaitUri(context, outFile.absolutePath)
+                ?: queryExistingMediaUriByPath(context, outFile.absolutePath)
+
+            if (scannedUri != null) {
+                updateMediaStoreDateColumns(context, scannedUri, targetMillis)
+                // Re-apply filesystem timestamps in case MediaScanner touched file attributes
+                PhotoMetadataEngine.syncImageTimestamps(outFile, targetMillis, context)
+            }
 
             val uri = FileProvider.getUriForFile(
                 context,
@@ -980,9 +1053,182 @@ object PhotoStorageManager {
                 outFile
             )
             Pair(uri, outFile)
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            Log.e("ShamailMeta", "saveViaLegacyPublicPictures failed for $fileName: ${e.message}", e)
             null
         }
+    }
+
+    /**
+     * Reusable MediaStore + filesystem synchronization helper for existing or newly exported images.
+     * Avoids creating duplicate MediaStore entries and respects Scoped Storage restrictions gracefully.
+     */
+    fun syncExistingPhotoTimestamps(
+        context: Context,
+        uri: Uri,
+        filePath: String?,
+        timestampMillis: Long
+    ): Boolean {
+        val targetMillis = PhotoMetadataEngine.normalizeToSecondMillis(timestampMillis)
+        val resolvedPath = filePath ?: queryMediaStoreRowInfo(context, uri)?.dataPath
+        val mediaUri = if (uri.authority == MediaStore.AUTHORITY) {
+            uri
+        } else if (!resolvedPath.isNullOrBlank()) {
+            queryExistingMediaUriByPath(context, resolvedPath)
+        } else {
+            null
+        }
+        return syncMediaStoreImageTimestamps(context, mediaUri, resolvedPath, targetMillis)
+    }
+
+    private fun syncMediaStoreImageTimestamps(
+        context: Context,
+        mediaUri: Uri?,
+        filePath: String?,
+        timestampMillis: Long
+    ): Boolean {
+        val targetMillis = PhotoMetadataEngine.normalizeToSecondMillis(timestampMillis)
+        val targetSec = (targetMillis / 1000L).coerceAtLeast(1L)
+        var fsSynced = false
+
+        if (!filePath.isNullOrBlank()) {
+            val targetFile = File(filePath)
+            if (targetFile.exists()) {
+                fsSynced = PhotoMetadataEngine.syncImageTimestamps(targetFile, targetMillis, context).lastModifiedSuccess
+            }
+        }
+
+        var targetUri = mediaUri
+        if (targetUri == null && !filePath.isNullOrBlank()) {
+            targetUri = queryExistingMediaUriByPath(context, filePath)
+        }
+
+        var msUpdated = false
+        if (targetUri != null) {
+            msUpdated = updateMediaStoreDateColumns(context, targetUri, targetMillis)
+
+            val afterInfo = queryMediaStoreRowInfo(context, targetUri)
+            val dateModMismatch = afterInfo?.dateModifiedSec != null &&
+                abs(afterInfo.dateModifiedSec - targetSec) > 2L
+
+            if (dateModMismatch && !filePath.isNullOrBlank() && fsSynced) {
+                // Trigger scanner on existing path so MediaProvider refreshes DATE_MODIFIED from synced file mtime
+                val rescannedUri = scanImageFileAndAwaitUri(context, filePath) ?: targetUri
+                msUpdated = updateMediaStoreDateColumns(context, rescannedUri, targetMillis) || msUpdated
+                val finalFile = File(filePath)
+                if (finalFile.exists()) {
+                    PhotoMetadataEngine.syncImageTimestamps(finalFile, targetMillis, context)
+                }
+            }
+        } else if (!filePath.isNullOrBlank()) {
+            val scanned = scanImageFileAndAwaitUri(context, filePath)
+            if (scanned != null) {
+                msUpdated = updateMediaStoreDateColumns(context, scanned, targetMillis)
+                val finalFile = File(filePath)
+                if (finalFile.exists()) {
+                    PhotoMetadataEngine.syncImageTimestamps(finalFile, targetMillis, context)
+                }
+            }
+        }
+
+        return fsSynced || msUpdated
+    }
+
+    private fun updateMediaStoreDateColumns(
+        context: Context,
+        uri: Uri,
+        timestampMillis: Long
+    ): Boolean {
+        val targetMillis = PhotoMetadataEngine.normalizeToSecondMillis(timestampMillis)
+        val timeSec = (targetMillis / 1000L).coerceAtLeast(1L)
+        val resolver = context.contentResolver
+
+        val fullValues = ContentValues().apply {
+            put(MediaStore.Images.Media.DATE_TAKEN, targetMillis)
+            put(MediaStore.Images.Media.DATE_ADDED, timeSec)
+            put(MediaStore.Images.Media.DATE_MODIFIED, timeSec)
+        }
+        val fullCount = runCatching { resolver.update(uri, fullValues, null, null) }.getOrNull()
+        if (fullCount != null && fullCount > 0) return true
+
+        val takenAndMod = ContentValues().apply {
+            put(MediaStore.Images.Media.DATE_TAKEN, targetMillis)
+            put(MediaStore.Images.Media.DATE_MODIFIED, timeSec)
+        }
+        val partialCount = runCatching { resolver.update(uri, takenAndMod, null, null) }.getOrNull()
+        if (partialCount != null && partialCount > 0) return true
+
+        val takenOnly = ContentValues().apply {
+            put(MediaStore.Images.Media.DATE_TAKEN, targetMillis)
+        }
+        val takenCount = runCatching { resolver.update(uri, takenOnly, null, null) }.getOrNull()
+        if (takenCount == null || takenCount == 0) {
+            Log.w("ShamailMeta", "Unable to update MediaStore date columns for $uri (Scoped Storage restriction)")
+            return false
+        }
+        return true
+    }
+
+    private fun scanImageFileAndAwaitUri(context: Context, path: String): Uri? {
+        val latch = CountDownLatch(1)
+        var scannedUri: Uri? = null
+        try {
+            MediaScannerConnection.scanFile(
+                context,
+                arrayOf(path),
+                arrayOf("image/jpeg")
+            ) { _, uri ->
+                scannedUri = uri
+                latch.countDown()
+            }
+            latch.await(2500L, TimeUnit.MILLISECONDS)
+        } catch (e: Exception) {
+            Log.w("ShamailMeta", "MediaScannerConnection.scanFile warning for $path: ${e.message}")
+        }
+        return scannedUri
+    }
+
+    @Suppress("DEPRECATION")
+    private fun queryExistingMediaUriByPath(context: Context, path: String): Uri? {
+        return runCatching {
+            context.contentResolver.query(
+                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                arrayOf(MediaStore.Images.Media._ID),
+                "${MediaStore.MediaColumns.DATA} = ?",
+                arrayOf(path),
+                null
+            )?.use { c ->
+                if (c.moveToFirst()) {
+                    val id = c.getLong(c.getColumnIndexOrThrow(MediaStore.Images.Media._ID))
+                    ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id)
+                } else null
+            }
+        }.getOrNull()
+    }
+
+    @Suppress("DEPRECATION")
+    private fun queryMediaStoreRowInfo(context: Context, uri: Uri): MediaStoreRowInfo? {
+        return runCatching {
+            val cols = arrayOf(
+                MediaStore.MediaColumns.DATA,
+                MediaStore.Images.Media.DATE_TAKEN,
+                MediaStore.Images.Media.DATE_MODIFIED,
+                MediaStore.Images.Media.DATE_ADDED
+            )
+            context.contentResolver.query(uri, cols, null, null, null)?.use { c ->
+                if (!c.moveToFirst()) return@use null
+                val dataIdx = c.getColumnIndex(MediaStore.MediaColumns.DATA)
+                val takenIdx = c.getColumnIndex(MediaStore.Images.Media.DATE_TAKEN)
+                val modIdx = c.getColumnIndex(MediaStore.Images.Media.DATE_MODIFIED)
+                val addedIdx = c.getColumnIndex(MediaStore.Images.Media.DATE_ADDED)
+                MediaStoreRowInfo(
+                    dataPath = if (dataIdx >= 0 && !c.isNull(dataIdx)) c.getString(dataIdx) else null,
+                    dateTakenMillis = if (takenIdx >= 0 && !c.isNull(takenIdx)) c.getLong(takenIdx) else null,
+                    dateModifiedSec = if (modIdx >= 0 && !c.isNull(modIdx)) c.getLong(modIdx) else null,
+                    dateAddedSec = if (addedIdx >= 0 && !c.isNull(addedIdx)) c.getLong(addedIdx) else null
+                )
+            }
+        }.getOrNull()
     }
 
     private fun applyPreservedHardwareExif(
@@ -1024,6 +1270,8 @@ object PhotoStorageManager {
                 MediaStore.Images.Media._ID,
                 MediaStore.Images.Media.DISPLAY_NAME,
                 MediaStore.Images.Media.DATE_ADDED,
+                MediaStore.Images.Media.DATE_TAKEN,
+                MediaStore.Images.Media.DATE_MODIFIED,
                 MediaStore.Images.Media.RELATIVE_PATH
             )
             val imgSelection = "${MediaStore.Images.Media.RELATIVE_PATH} LIKE ?"
@@ -1040,12 +1288,19 @@ object PhotoStorageManager {
                 )?.use { cursor ->
                     val idCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
                     val nameCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DISPLAY_NAME)
-                    val dateCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DATE_ADDED)
+                    val dateAddedCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DATE_ADDED)
+                    val dateTakenCol = cursor.getColumnIndex(MediaStore.Images.Media.DATE_TAKEN)
+                    val dateModCol = cursor.getColumnIndex(MediaStore.Images.Media.DATE_MODIFIED)
 
                     while (cursor.moveToNext()) {
                         val id = cursor.getLong(idCol)
                         val name = cursor.getString(nameCol) ?: "SHAMAIL_GPS.jpg"
-                        val dateSec = cursor.getLong(dateCol)
+                        val dateAddedSec = cursor.getLong(dateAddedCol)
+                        val dateTakenMs = if (dateTakenCol >= 0 && !cursor.isNull(dateTakenCol)) cursor.getLong(dateTakenCol) else 0L
+                        val dateModSec = if (dateModCol >= 0 && !cursor.isNull(dateModCol)) cursor.getLong(dateModCol) else 0L
+                        val effectiveDateSec = (dateTakenMs / 1000L).takeIf { it > 0L }
+                            ?: dateModSec.takeIf { it > 0L }
+                            ?: dateAddedSec
                         val contentUri = ContentUris.withAppendedId(
                             MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
                             id
@@ -1055,7 +1310,7 @@ object PhotoStorageManager {
                             SavedPhotoItem(
                                 uri = contentUri,
                                 displayName = name,
-                                dateAddedSeconds = dateSec,
+                                dateAddedSeconds = effectiveDateSec,
                                 filePath = null,
                                 timestampProvenance = provenance,
                                 isVideo = false,
@@ -1220,12 +1475,7 @@ object PhotoStorageManager {
     }
 
     private fun parseExifDateTime(raw: String?): Long? {
-        val text = raw?.trim().orEmpty()
-        if (text.isEmpty()) return null
-        return runCatching {
-            SimpleDateFormat("yyyy:MM:dd HH:mm:ss", Locale.US).apply { isLenient = false }
-                .parse(text)?.time
-        }.getOrNull()
+        return PhotoMetadataEngine.parseExifTimestampMillis(raw)
     }
 
     private fun ensureUniqueOutputFileName(context: Context, requestedName: String): String {

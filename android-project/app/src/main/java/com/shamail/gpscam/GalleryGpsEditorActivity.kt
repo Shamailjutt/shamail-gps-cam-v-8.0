@@ -34,6 +34,7 @@ import com.shamail.gpscam.data.WatermarkStyle
 import com.shamail.gpscam.data.WatermarkTextColor
 import com.shamail.gpscam.databinding.ActivityGalleryGpsEditorBinding
 import com.shamail.gpscam.location.LocationInputResolver
+import com.shamail.gpscam.metadata.PhotoMetadataEngine
 import com.shamail.gpscam.storage.PhotoStorageManager
 import com.shamail.gpscam.storage.SourceExifSnapshot
 import com.shamail.gpscam.ui.SequentialDateTimePicker
@@ -530,7 +531,7 @@ class GalleryGpsEditorActivity : AppCompatActivity() {
             ) { confirmedMillis ->
                 workingConfig = workingConfig.copy(
                     timestampMode = TimestampMode.MANUAL,
-                    manualTimestampMillis = confirmedMillis
+                    manualTimestampMillis = PhotoMetadataEngine.normalizeToSecondMillis(confirmedMillis)
                 )
                 updateTimestampReadout()
                 renderLiveWatermarkedPreview()
@@ -547,7 +548,7 @@ class GalleryGpsEditorActivity : AppCompatActivity() {
             ) { confirmedMillis ->
                 workingConfig = workingConfig.copy(
                     timestampMode = TimestampMode.MANUAL,
-                    manualTimestampMillis = confirmedMillis
+                    manualTimestampMillis = PhotoMetadataEngine.normalizeToSecondMillis(confirmedMillis)
                 )
                 updateTimestampReadout()
                 renderLiveWatermarkedPreview()
@@ -555,7 +556,7 @@ class GalleryGpsEditorActivity : AppCompatActivity() {
         }
 
         binding.btnGalleryResetNow.setOnClickListener {
-            val now = System.currentTimeMillis()
+            val now = PhotoMetadataEngine.normalizeToSecondMillis(System.currentTimeMillis())
             workingConfig = workingConfig.copy(
                 timestampMode = TimestampMode.AUTO_DEVICE,
                 manualTimestampMillis = now
@@ -1000,8 +1001,10 @@ class GalleryGpsEditorActivity : AppCompatActivity() {
 
         val exportCfg = workingConfig.copy()
         val exportGps = workingGps.copy()
-        val exportMillis = System.currentTimeMillis()
-        val displayedMillis = exportCfg.resolveTimestampMillis(exportGps, exportMillis)
+        val exportMillis = PhotoMetadataEngine.normalizeToSecondMillis(System.currentTimeMillis())
+        val displayedMillis = PhotoMetadataEngine.normalizeToSecondMillis(
+            exportCfg.resolveTimestampMillis(exportGps, exportMillis)
+        )
 
         if (selectedIsVideo) {
             if (binding.vvGalleryVideo.isPlaying) {

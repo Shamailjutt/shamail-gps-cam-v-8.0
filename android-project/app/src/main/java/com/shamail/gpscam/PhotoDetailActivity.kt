@@ -22,6 +22,7 @@ import com.shamail.gpscam.data.SavedLocationDatabase
 import com.shamail.gpscam.data.TimestampMode
 import com.shamail.gpscam.databinding.ActivityPhotoDetailBinding
 import com.shamail.gpscam.location.LocationInputResolver
+import com.shamail.gpscam.metadata.PhotoMetadataEngine
 import com.shamail.gpscam.storage.EditablePhotoContext
 import com.shamail.gpscam.storage.EditableVideoContext
 import com.shamail.gpscam.storage.PhotoStorageManager
@@ -647,6 +648,7 @@ class PhotoDetailActivity : AppCompatActivity() {
 
     private fun renderEditPreview(editedMillis: Long, editedGps: GpsSnapshot) {
         if (!AuthManager.isAdmin(this)) return
+        val normalizedMillis = PhotoMetadataEngine.normalizeToSecondMillis(editedMillis)
         val appCfg = prefs.loadConfig()
 
         if (isVideo) {
@@ -659,7 +661,7 @@ class PhotoDetailActivity : AppCompatActivity() {
 
             val previewCfg = vCtx.config.copy(
                 timestampMode = TimestampMode.MANUAL,
-                manualTimestampMillis = editedMillis,
+                manualTimestampMillis = normalizedMillis,
                 is24HourFormat = appCfg.is24HourFormat,
                 dateFormatPattern = appCfg.dateFormatPattern,
                 showWatermark = true
@@ -674,17 +676,17 @@ class PhotoDetailActivity : AppCompatActivity() {
                     config = previewCfg,
                     gps = editedGps,
                     logoBitmap = logoBmp,
-                    captureMillis = editedMillis,
+                    captureMillis = normalizedMillis,
                     forceOpaqueBackground = false,
                     replaceExistingWatermark = !vCtx.hasCleanOriginal,
                     oldGpsForRemoval = vCtx.gps
                 )
-                val formattedStamp = previewCfg.formatTimestamp(editedGps, editedMillis)
+                val formattedStamp = previewCfg.formatTimestamp(editedGps, normalizedMillis)
                 val locationLabel = if (editedGps.hasFix) editedGps.buildLocationHeadline() else "Location"
                 withContext(Dispatchers.Main) {
                     isBusy = false
                     binding.btnSaveEditedCopy.isEnabled = true
-                    pendingEditedMillis = editedMillis
+                    pendingEditedMillis = normalizedMillis
                     pendingEditedGps = editedGps
                     val oldPreview = previewBitmap
                     previewBitmap = rendered
@@ -704,7 +706,7 @@ class PhotoDetailActivity : AppCompatActivity() {
         val ctx = editableContext ?: return
         val previewCfg = ctx.config.copy(
             timestampMode = TimestampMode.MANUAL,
-            manualTimestampMillis = editedMillis,
+            manualTimestampMillis = normalizedMillis,
             is24HourFormat = appCfg.is24HourFormat,
             dateFormatPattern = appCfg.dateFormatPattern,
             showWatermark = true
@@ -719,17 +721,17 @@ class PhotoDetailActivity : AppCompatActivity() {
                 config = previewCfg,
                 gps = editedGps,
                 logoBitmap = logoBmp,
-                captureMillis = editedMillis,
+                captureMillis = normalizedMillis,
                 forceOpaqueBackground = false,
                 replaceExistingWatermark = !ctx.hasCleanOriginal,
                 oldGpsForRemoval = ctx.gps
             )
-            val formattedStamp = previewCfg.formatTimestamp(editedGps, editedMillis)
+            val formattedStamp = previewCfg.formatTimestamp(editedGps, normalizedMillis)
             val locationLabel = if (editedGps.hasFix) editedGps.buildLocationHeadline() else "Location"
             withContext(Dispatchers.Main) {
                 isBusy = false
                 binding.btnSaveEditedCopy.isEnabled = true
-                pendingEditedMillis = editedMillis
+                pendingEditedMillis = normalizedMillis
                 pendingEditedGps = editedGps
                 val oldPreview = previewBitmap
                 previewBitmap = rendered
@@ -960,17 +962,25 @@ class PhotoDetailActivity : AppCompatActivity() {
                 val fmt = SimpleDateFormat("dd MMM yyyy, hh:mm:ss a", Locale.US)
                 val sb = StringBuilder()
 
-                sb.append("ORIGINAL CAPTURE INFO (EXIF PRESERVED)\n")
-                sb.append("• Capture Date & Time: ")
-                sb.append(record.originalCaptureMillis?.let { fmt.format(Date(it)) } ?: "Not embedded in source")
-                sb.append("\n• Original GPS Coordinates: ")
-                if (record.originalLatitude != null && record.originalLongitude != null) {
-                    sb.append(String.format(Locale.US, "%.6f°, %.6f°", record.originalLatitude, record.originalLongitude))
-                } else {
-                    sb.append("Not recorded")
+                sb.append("AUTHORITATIVE FILE METADATA (EXIF & MEDIASTORE SYNCED)\n")
+                sb.append("• File & EXIF Date/Time: ")
+                sb.append(fmt.format(Date(record.watermarkDateTimeMillis)))
+                if (record.watermarkLocationTitle.isNotBlank() || record.watermarkLatitude != null) {
+                    sb.append("\n• Location: ")
+                    sb.append(record.watermarkLocationTitle.ifBlank { "Coordinates attached" })
                 }
-                if (!record.originalLocationTitle.isNullOrBlank()) {
-                    sb.append("\n• Original Place: ${record.originalLocationTitle}")
+                if (record.watermarkAddress.isNotBlank()) {
+                    sb.append("\n• Address: ${record.watermarkAddress}")
+                }
+                if (record.watermarkLatitude != null && record.watermarkLongitude != null) {
+                    sb.append(
+                        String.format(
+                            Locale.US,
+                            "\n• Coordinates: %.6f°, %.6f°",
+                            record.watermarkLatitude,
+                            record.watermarkLongitude
+                        )
+                    )
                 }
                 if (!record.cameraInfo.isNullOrBlank()) {
                     sb.append("\n• Camera Device: ${record.cameraInfo}")
@@ -979,25 +989,24 @@ class PhotoDetailActivity : AppCompatActivity() {
                     sb.append("\n• Source Photo: ${record.sourcePhotoName}")
                 }
 
-                sb.append("\n\nWATERMARK DISPLAY INFO\n")
-                sb.append("• Displayed Time (${if (record.isCustomTimestamp) "Custom Info" else "Original Capture"}): ")
-                sb.append(fmt.format(Date(record.watermarkDateTimeMillis)))
-                if (record.watermarkLocationTitle.isNotBlank() || record.watermarkLatitude != null) {
-                    sb.append("\n• Displayed Location (${if (record.isCustomLocation) "Custom Info" else "Original GPS"}): ")
-                    sb.append(record.watermarkLocationTitle.ifBlank { "Coordinates attached" })
-                }
-                if (record.watermarkAddress.isNotBlank()) {
-                    sb.append("\n• Displayed Address: ${record.watermarkAddress}")
-                }
-                if (record.watermarkLatitude != null && record.watermarkLongitude != null) {
-                    sb.append(
-                        String.format(
-                            Locale.US,
-                            "\n• Displayed Coords: %.6f°, %.6f°",
-                            record.watermarkLatitude,
-                            record.watermarkLongitude
+                if (record.originalCaptureMillis != null || (record.originalLatitude != null && record.originalLongitude != null)) {
+                    sb.append("\n\nSOURCE REFERENCE\n")
+                    if (record.originalCaptureMillis != null) {
+                        sb.append("• Source Reference Time: ${fmt.format(Date(record.originalCaptureMillis))}\n")
+                    }
+                    if (record.originalLatitude != null && record.originalLongitude != null) {
+                        sb.append(
+                            String.format(
+                                Locale.US,
+                                "• Source Reference Coords: %.6f°, %.6f°\n",
+                                record.originalLatitude,
+                                record.originalLongitude
+                            )
                         )
-                    )
+                    }
+                    if (!record.originalLocationTitle.isNullOrBlank()) {
+                        sb.append("• Source Place: ${record.originalLocationTitle}\n")
+                    }
                 }
 
                 sb.append("\n\nEDIT HISTORY\n")

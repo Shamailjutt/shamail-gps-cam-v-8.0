@@ -21,6 +21,7 @@ import com.shamail.gpscam.data.VideoGpsKeyframe
 import com.shamail.gpscam.data.WatermarkConfig
 import com.shamail.gpscam.databinding.ActivityPostCaptureEditBinding
 import com.shamail.gpscam.location.LocationInputResolver
+import com.shamail.gpscam.metadata.PhotoMetadataEngine
 import com.shamail.gpscam.storage.PhotoStorageManager
 import com.shamail.gpscam.ui.SequentialDateTimePicker
 import com.shamail.gpscam.watermark.WatermarkRenderer
@@ -31,6 +32,7 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.TimeZone
 import kotlin.math.max
 
 class PostCaptureEditActivity : AppCompatActivity() {
@@ -56,8 +58,14 @@ class PostCaptureEditActivity : AppCompatActivity() {
     private var logoBitmap: Bitmap? = null
     private var isSaving = false
 
-    private val isoDateFmt = SimpleDateFormat("yyyy-MM-dd", Locale.US).apply { isLenient = false }
-    private val isoTimeFmt = SimpleDateFormat("HH:mm:ss", Locale.US).apply { isLenient = false }
+    private val isoDateFmt = SimpleDateFormat("yyyy-MM-dd", Locale.US).apply {
+        isLenient = false
+        timeZone = TimeZone.getDefault()
+    }
+    private val isoTimeFmt = SimpleDateFormat("HH:mm:ss", Locale.US).apply {
+        isLenient = false
+        timeZone = TimeZone.getDefault()
+    }
 
     private val mapPickerLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -228,11 +236,12 @@ class PostCaptureEditActivity : AppCompatActivity() {
                 is24HourFormat = workingConfig.is24HourFormat,
                 dateFormatPattern = workingConfig.dateFormatPattern
             ) { confirmedMillis ->
+                val normalized = PhotoMetadataEngine.normalizeToSecondMillis(confirmedMillis)
                 workingConfig = workingConfig.copy(
                     timestampMode = TimestampMode.MANUAL,
-                    manualTimestampMillis = confirmedMillis
+                    manualTimestampMillis = normalized
                 )
-                syncDateAndTimeInputs(confirmedMillis)
+                syncDateAndTimeInputs(normalized)
                 renderWatermarkedPreview()
             }
         }
@@ -245,17 +254,18 @@ class PostCaptureEditActivity : AppCompatActivity() {
                 is24HourFormat = workingConfig.is24HourFormat,
                 dateFormatPattern = workingConfig.dateFormatPattern
             ) { confirmedMillis ->
+                val normalized = PhotoMetadataEngine.normalizeToSecondMillis(confirmedMillis)
                 workingConfig = workingConfig.copy(
                     timestampMode = TimestampMode.MANUAL,
-                    manualTimestampMillis = confirmedMillis
+                    manualTimestampMillis = normalized
                 )
-                syncDateAndTimeInputs(confirmedMillis)
+                syncDateAndTimeInputs(normalized)
                 renderWatermarkedPreview()
             }
         }
 
         binding.btnPostResetTime.setOnClickListener {
-            val now = System.currentTimeMillis()
+            val now = PhotoMetadataEngine.normalizeToSecondMillis(System.currentTimeMillis())
             workingConfig = workingConfig.copy(
                 timestampMode = TimestampMode.AUTO_DEVICE,
                 manualTimestampMillis = now
@@ -271,11 +281,12 @@ class PostCaptureEditActivity : AppCompatActivity() {
             if (parsed == null) {
                 Toast.makeText(this, "Use YYYY-MM-DD and HH:MM:SS format", Toast.LENGTH_SHORT).show()
             } else {
+                val normalized = PhotoMetadataEngine.normalizeToSecondMillis(parsed)
                 workingConfig = workingConfig.copy(
                     timestampMode = TimestampMode.MANUAL,
-                    manualTimestampMillis = parsed
+                    manualTimestampMillis = normalized
                 )
-                syncDateAndTimeInputs(parsed)
+                syncDateAndTimeInputs(normalized)
                 renderWatermarkedPreview()
                 Toast.makeText(this, "Updated date & time on photo", Toast.LENGTH_SHORT).show()
             }
@@ -444,13 +455,18 @@ class PostCaptureEditActivity : AppCompatActivity() {
         if (dStr.isEmpty() || tStr.isEmpty()) return null
         if (tStr.count { it == ':' } == 1) tStr = "$tStr:00"
         return runCatching {
-            SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).apply { isLenient = false }
-                .parse("$dStr $tStr")?.time
+            SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).apply {
+                isLenient = false
+                timeZone = TimeZone.getDefault()
+            }.parse("$dStr $tStr")?.time?.let { PhotoMetadataEngine.normalizeToSecondMillis(it) }
         }.getOrNull()
     }
 
     private fun syncDateAndTimeInputs(ms: Long) {
-        val dt = Date(ms)
+        val tz = TimeZone.getDefault()
+        isoDateFmt.timeZone = tz
+        isoTimeFmt.timeZone = tz
+        val dt = Date(PhotoMetadataEngine.normalizeToSecondMillis(ms))
         binding.etPostDate.setText(isoDateFmt.format(dt))
         binding.etPostTime.setText(isoTimeFmt.format(dt))
     }
@@ -533,11 +549,14 @@ class PostCaptureEditActivity : AppCompatActivity() {
 
         // Apply any typed changes in the date/time or location fields before saving
         parseTypedDateTime()?.let { typedMs ->
-            val currentResolved = workingConfig.resolveTimestampMillis(workingGps, captureMomentMillis)
-            if (kotlin.math.abs(typedMs - currentResolved) > 1500L) {
+            val currentResolved = PhotoMetadataEngine.normalizeToSecondMillis(
+                workingConfig.resolveTimestampMillis(workingGps, captureMomentMillis)
+            )
+            val normalizedTyped = PhotoMetadataEngine.normalizeToSecondMillis(typedMs)
+            if (kotlin.math.abs(normalizedTyped - currentResolved) >= 1000L) {
                 workingConfig = workingConfig.copy(
                     timestampMode = TimestampMode.MANUAL,
-                    manualTimestampMillis = typedMs
+                    manualTimestampMillis = normalizedTyped
                 )
             }
         }

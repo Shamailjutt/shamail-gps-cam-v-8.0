@@ -129,4 +129,6 @@ dependencies {
     // Google Play Services Fused Location Provider & Maps SDK for Android (19.2.0+ required for MapsApiSettings)
     implementation("com.google.android.gms:play-services-location:21.3.0")
     implementation("com.google.android.gms:play-services-maps:19.2.0")
+
+    testImplementation("junit:junit:4.13.2")
 }

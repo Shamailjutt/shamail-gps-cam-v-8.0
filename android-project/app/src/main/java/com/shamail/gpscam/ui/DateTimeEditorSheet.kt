@@ -13,9 +13,11 @@ import com.shamail.gpscam.data.GpsSnapshot
 import com.shamail.gpscam.data.TimestampMode
 import com.shamail.gpscam.data.WatermarkConfig
 import com.shamail.gpscam.databinding.SheetDateTimeEditorBinding
+import com.shamail.gpscam.metadata.PhotoMetadataEngine
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.TimeZone
 
 class DateTimeEditorSheet(
     private val currentGps: GpsSnapshot,
@@ -28,8 +30,14 @@ class DateTimeEditorSheet(
     private lateinit var prefs: AppPreferences
     private lateinit var workingConfig: WatermarkConfig
 
-    private val isoDateFmt = SimpleDateFormat("yyyy-MM-dd", Locale.US).apply { isLenient = false }
-    private val isoTime24Fmt = SimpleDateFormat("HH:mm:ss", Locale.US).apply { isLenient = false }
+    private val isoDateFmt = SimpleDateFormat("yyyy-MM-dd", Locale.US).apply {
+        isLenient = false
+        timeZone = TimeZone.getDefault()
+    }
+    private val isoTime24Fmt = SimpleDateFormat("HH:mm:ss", Locale.US).apply {
+        isLenient = false
+        timeZone = TimeZone.getDefault()
+    }
 
     override fun onCreateView(
         inflater: LayoutInflater,
@@ -99,7 +107,7 @@ class DateTimeEditorSheet(
         }
 
         binding.btnResetNow.setOnClickListener {
-            val now = System.currentTimeMillis()
+            val now = PhotoMetadataEngine.normalizeToSecondMillis(System.currentTimeMillis())
             workingConfig = workingConfig.copy(
                 timestampMode = TimestampMode.AUTO_DEVICE,
                 manualTimestampMillis = now
@@ -117,7 +125,9 @@ class DateTimeEditorSheet(
             }
             if (workingConfig.timestampMode == TimestampMode.MANUAL) {
                 tryParseTypedMillis()?.let { parsed ->
-                    workingConfig = workingConfig.copy(manualTimestampMillis = parsed)
+                    workingConfig = workingConfig.copy(
+                        manualTimestampMillis = PhotoMetadataEngine.normalizeToSecondMillis(parsed)
+                    )
                 }
             }
             prefs.saveConfig(workingConfig)
@@ -140,12 +150,13 @@ class DateTimeEditorSheet(
 
     private fun applyConfirmedMillis(confirmedMillis: Long) {
         if (_binding == null) return
+        val normalized = PhotoMetadataEngine.normalizeToSecondMillis(confirmedMillis)
         workingConfig = workingConfig.copy(
             timestampMode = TimestampMode.MANUAL,
-            manualTimestampMillis = confirmedMillis
+            manualTimestampMillis = normalized
         )
         binding.rbModeManual.isChecked = true
-        syncEditableFieldsFromMillis(confirmedMillis)
+        syncEditableFieldsFromMillis(normalized)
         refreshUiVisibilityAndPreview()
         Toast.makeText(requireContext(), "Custom date & time confirmed", Toast.LENGTH_SHORT).show()
     }
@@ -160,12 +171,13 @@ class DateTimeEditorSheet(
             ).show()
             return
         }
+        val normalized = PhotoMetadataEngine.normalizeToSecondMillis(parsed)
         workingConfig = workingConfig.copy(
             timestampMode = TimestampMode.MANUAL,
-            manualTimestampMillis = parsed
+            manualTimestampMillis = normalized
         )
         binding.rbModeManual.isChecked = true
-        syncEditableFieldsFromMillis(parsed)
+        syncEditableFieldsFromMillis(normalized)
         refreshUiVisibilityAndPreview()
         Toast.makeText(requireContext(), "Custom timestamp updated", Toast.LENGTH_SHORT).show()
     }
@@ -180,15 +192,21 @@ class DateTimeEditorSheet(
         return try {
             val combined = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).apply {
                 isLenient = false
+                timeZone = TimeZone.getDefault()
             }
-            combined.parse("$rawDate $rawTime")?.time
+            combined.parse("$rawDate $rawTime")?.time?.let {
+                PhotoMetadataEngine.normalizeToSecondMillis(it)
+            }
         } catch (_: Exception) {
             null
         }
     }
 
     private fun syncEditableFieldsFromMillis(millis: Long) {
-        val dateObj = Date(millis)
+        val tz = TimeZone.getDefault()
+        isoDateFmt.timeZone = tz
+        isoTime24Fmt.timeZone = tz
+        val dateObj = Date(PhotoMetadataEngine.normalizeToSecondMillis(millis))
         binding.etManualDate.setText(isoDateFmt.format(dateObj))
         binding.etManualTime.setText(isoTime24Fmt.format(dateObj))
     }

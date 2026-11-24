@@ -43,6 +43,7 @@ import com.shamail.gpscam.data.VideoGpsKeyframe
 import com.shamail.gpscam.data.WatermarkConfig
 import com.shamail.gpscam.databinding.ActivityMainBinding
 import com.shamail.gpscam.location.LocationHelper
+import com.shamail.gpscam.metadata.PhotoMetadataEngine
 import com.shamail.gpscam.storage.PhotoStorageManager
 import com.shamail.gpscam.ui.DateTimeEditorSheet
 import com.shamail.gpscam.watermark.WatermarkRenderer
@@ -638,7 +639,7 @@ class MainActivity : AppCompatActivity() {
             .setDuration(180L)
             .start()
 
-        val captureMomentMillis = System.currentTimeMillis()
+        val captureMomentMillis = PhotoMetadataEngine.normalizeToSecondMillis(System.currentTimeMillis())
         val capturedConfig = effectiveConfigForRole(watermarkConfig.copy())
         val capturedGps = gpsSnapshot.copy()
         val isFront = lensFacing == CameraSelector.LENS_FACING_FRONT
