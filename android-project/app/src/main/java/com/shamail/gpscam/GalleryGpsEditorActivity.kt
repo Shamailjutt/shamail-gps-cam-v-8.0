@@ -38,6 +38,7 @@ import com.shamail.gpscam.metadata.PhotoMetadataEngine
 import com.shamail.gpscam.storage.PhotoStorageManager
 import com.shamail.gpscam.storage.SourceExifSnapshot
 import com.shamail.gpscam.ui.SequentialDateTimePicker
+import com.shamail.gpscam.watermark.SatelliteMapThumbnailProvider
 import com.shamail.gpscam.watermark.WatermarkRenderer
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -395,9 +396,8 @@ class GalleryGpsEditorActivity : AppCompatActivity() {
         binding.etGalleryOrgName.setText(workingConfig.organizationName)
 
         when (workingConfig.watermarkStyle) {
-            WatermarkStyle.CLASSIC_CARD -> binding.rbGalleryStyleClassic.isChecked = true
-            WatermarkStyle.COMPACT_STRIP -> binding.rbGalleryStyleCompact.isChecked = true
-            WatermarkStyle.MODERN_BANNER -> binding.rbGalleryStyleBanner.isChecked = true
+            WatermarkStyle.GPS_MAP_CAMERA -> binding.rbGalleryStyleGpsMapCamera.isChecked = true
+            else -> binding.rbGalleryStyleClassic.isChecked = true
         }
 
         when (workingConfig.watermarkPosition) {
@@ -595,8 +595,7 @@ class GalleryGpsEditorActivity : AppCompatActivity() {
 
         binding.rgGalleryStyle.setOnCheckedChangeListener { _, checkedId ->
             val style = when (checkedId) {
-                R.id.rbGalleryStyleCompact -> WatermarkStyle.COMPACT_STRIP
-                R.id.rbGalleryStyleBanner -> WatermarkStyle.MODERN_BANNER
+                R.id.rbGalleryStyleGpsMapCamera -> WatermarkStyle.GPS_MAP_CAMERA
                 else -> WatermarkStyle.CLASSIC_CARD
             }
             workingConfig = workingConfig.copy(watermarkStyle = style)
@@ -960,6 +959,15 @@ class GalleryGpsEditorActivity : AppCompatActivity() {
 
         previewRenderJob?.cancel()
         previewRenderJob = lifecycleScope.launch(Dispatchers.Default) {
+            val mapThumb = if (cfgSnap.watermarkStyle == WatermarkStyle.GPS_MAP_CAMERA && gpsSnap.hasFix) {
+                SatelliteMapThumbnailProvider.getOrFetchBlocking(
+                    this@GalleryGpsEditorActivity,
+                    gpsSnap.latitude,
+                    gpsSnap.longitude
+                )
+            } else {
+                null
+            }
             val rendered = WatermarkRenderer.renderOntoBitmap(
                 source = base,
                 config = cfgSnap,
@@ -968,7 +976,8 @@ class GalleryGpsEditorActivity : AppCompatActivity() {
                 captureMillis = nowMs,
                 forceOpaqueBackground = false,
                 replaceExistingWatermark = shouldReplace,
-                oldGpsForRemoval = gpsSnap
+                oldGpsForRemoval = gpsSnap,
+                mapThumbnailBitmap = mapThumb
             )
             withContext(Dispatchers.Main) {
                 val old = currentRenderedPreview

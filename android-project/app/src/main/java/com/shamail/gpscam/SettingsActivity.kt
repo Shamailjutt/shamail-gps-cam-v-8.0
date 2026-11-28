@@ -140,9 +140,8 @@ class SettingsActivity : AppCompatActivity() {
         refreshTimestampStatusLabel()
 
         when (config.watermarkStyle) {
-            WatermarkStyle.CLASSIC_CARD -> binding.rbStyleClassic.isChecked = true
-            WatermarkStyle.COMPACT_STRIP -> binding.rbStyleCompact.isChecked = true
-            WatermarkStyle.MODERN_BANNER -> binding.rbStyleBanner.isChecked = true
+            WatermarkStyle.GPS_MAP_CAMERA -> binding.rbStyleGpsMapCamera.isChecked = true
+            else -> binding.rbStyleClassic.isChecked = true
         }
 
         when (config.textColor) {
@@ -302,11 +301,11 @@ class SettingsActivity : AppCompatActivity() {
 
         binding.rgWatermarkStyle.setOnCheckedChangeListener { _, checkedId ->
             val style = when (checkedId) {
-                R.id.rbStyleCompact -> WatermarkStyle.COMPACT_STRIP
-                R.id.rbStyleBanner -> WatermarkStyle.MODERN_BANNER
+                R.id.rbStyleGpsMapCamera -> WatermarkStyle.GPS_MAP_CAMERA
                 else -> WatermarkStyle.CLASSIC_CARD
             }
             config = config.copy(watermarkStyle = style)
+            prefs.saveConfig(config)
             refreshPreview()
         }
 

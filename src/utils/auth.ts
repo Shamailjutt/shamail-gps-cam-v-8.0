@@ -8,7 +8,7 @@ const SALT_HEX = '8f4b2e91c73a60d54e18b9f27a3c5d61';
 const ITERATIONS = 65536;
 const KEY_LENGTH_BITS = 256;
 const EXPECTED_USER_HASH = '4b27b96d0a6b5154840c926b0e3e379fe540f409f3197350e392768d17bd4d4b';
-const EXPECTED_PASS_HASH = '70ea70e1187f0ab2b5f61ba662098056374c30a463291a19ca46e6afff5962b3';
+const EXPECTED_PASS_HASH = '1886ff96764794d2eb51c25fd2bfade1788f54994f69a8646185c28faa45b807';
 
 function hexToBytes(hex: string): Uint8Array {
   const bytes = new Uint8Array(hex.length / 2);
@@ -55,7 +55,7 @@ export async function verifySettingsCredentials(
   passwordInput: string,
   rememberUser: boolean
 ): Promise<boolean> {
-  const trimmedUser = usernameInput.trim();
+  const trimmedUser = usernameInput.trim().toLowerCase();
   if (!trimmedUser || !passwordInput) return false;
 
   try {

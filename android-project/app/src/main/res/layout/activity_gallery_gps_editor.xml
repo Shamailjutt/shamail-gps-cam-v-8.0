@@ -626,7 +626,7 @@
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="12dp"
-                    android:text="Watermark Layout Style"
+                    android:text="Watermark Template"
                     android:textColor="@color/text_secondary"
                     android:textSize="11sp" />
 
@@ -641,25 +641,16 @@
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
                         android:layout_weight="1"
-                        android:text="Classic"
+                        android:text="Original GPS Cam"
                         android:textColor="@color/text_primary"
                         android:textSize="12sp" />
 
                     <RadioButton
-                        android:id="@+id/rbGalleryStyleCompact"
+                        android:id="@+id/rbGalleryStyleGpsMapCamera"
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
                         android:layout_weight="1"
-                        android:text="Compact"
-                        android:textColor="@color/text_primary"
-                        android:textSize="12sp" />
-
-                    <RadioButton
-                        android:id="@+id/rbGalleryStyleBanner"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:text="Banner"
+                        android:text="GPS Map Camera"
                         android:textColor="@color/text_primary"
                         android:textSize="12sp" />
                 </RadioGroup>

@@ -157,9 +157,10 @@
         android:paddingHorizontal="14dp"
         android:paddingVertical="8dp"
         android:visibility="gone"
-        app:layout_constraintBottom_toTopOf="@id/quickStampToolbar"
+        app:layout_constraintBottom_toTopOf="@id/llZoomControls"
+        app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintEnd_toEndOf="parent">
+        app:layout_goneMarginBottom="8dp">
 
         <ProgressBar
             style="?android:attr/progressBarStyleSmall"
@@ -176,6 +177,121 @@
             android:textColor="@color/gold_bright"
             android:textSize="12sp"
             android:textStyle="bold" />
+    </LinearLayout>
+
+    <!-- CameraX Zoom Controls (- / Dynamic Presets / + / 1x Reset + Smooth Slider) -->
+    <LinearLayout
+        android:id="@+id/llZoomControls"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginHorizontal="12dp"
+        android:layout_marginBottom="6dp"
+        android:background="@drawable/bg_mode_toggle_container"
+        android:orientation="vertical"
+        android:paddingHorizontal="10dp"
+        android:paddingTop="6dp"
+        android:paddingBottom="4dp"
+        android:visibility="gone"
+        app:layout_constraintBottom_toTopOf="@id/quickStampToolbar"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <TextView
+                android:id="@+id/btnZoomOut"
+                android:layout_width="32dp"
+                android:layout_height="28dp"
+                android:background="@drawable/bg_card_navy"
+                android:clickable="true"
+                android:contentDescription="Zoom Out"
+                android:focusable="true"
+                android:gravity="center"
+                android:text="-"
+                android:textColor="@color/gold_bright"
+                android:textSize="15sp"
+                android:textStyle="bold" />
+
+            <LinearLayout
+                android:id="@+id/llZoomPresets"
+                android:layout_width="0dp"
+                android:layout_height="28dp"
+                android:layout_marginHorizontal="6dp"
+                android:layout_weight="1"
+                android:gravity="center"
+                android:orientation="horizontal" />
+
+            <TextView
+                android:id="@+id/btnZoomIn"
+                android:layout_width="32dp"
+                android:layout_height="28dp"
+                android:background="@drawable/bg_card_navy"
+                android:clickable="true"
+                android:contentDescription="Zoom In"
+                android:focusable="true"
+                android:gravity="center"
+                android:text="+"
+                android:textColor="@color/gold_bright"
+                android:textSize="15sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/btnZoomReset"
+                android:layout_width="wrap_content"
+                android:layout_height="28dp"
+                android:layout_marginStart="6dp"
+                android:background="@drawable/bg_card_navy"
+                android:clickable="true"
+                android:contentDescription="Reset Zoom to 1x"
+                android:focusable="true"
+                android:gravity="center"
+                android:minWidth="48dp"
+                android:paddingHorizontal="8dp"
+                android:text="Reset"
+                android:textColor="@color/gold_bright"
+                android:textSize="11sp"
+                android:textStyle="bold" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="30dp"
+            android:layout_marginTop="2dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <TextView
+                android:id="@+id/tvZoomLevel"
+                android:layout_width="44dp"
+                android:layout_height="wrap_content"
+                android:fontFamily="monospace"
+                android:gravity="center_vertical|start"
+                android:text="1.0x"
+                android:textColor="@color/gold_bright"
+                android:textSize="11sp"
+                android:textStyle="bold" />
+
+            <com.google.android.material.slider.Slider
+                android:id="@+id/sliderZoom"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:stepSize="0.0"
+                android:value="1.0"
+                android:valueFrom="1.0"
+                android:valueTo="2.0"
+                app:haloRadius="14dp"
+                app:labelBehavior="gone"
+                app:thumbColor="@color/gold_bright"
+                app:thumbRadius="7dp"
+                app:trackColorActive="@color/gold_primary"
+                app:trackColorInactive="@color/navy_border"
+                app:trackHeight="3dp" />
+        </LinearLayout>
     </LinearLayout>
 
     <!-- Prominent One-Hand Action Bar Above Watermark: Gallery GPS Camera + Date & Time -->

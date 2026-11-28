@@ -5,6 +5,7 @@ import android.content.SharedPreferences
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKeys
 import java.security.MessageDigest
+import java.util.Locale
 import java.util.UUID
 import javax.crypto.SecretKeyFactory
 import javax.crypto.spec.PBEKeySpec
@@ -60,7 +61,7 @@ object AuthManager {
         passwordInput: String,
         rememberUser: Boolean
     ): Boolean {
-        val trimmedUser = usernameInput.trim()
+        val trimmedUser = usernameInput.trim().lowercase(Locale.ROOT)
         if (trimmedUser.isEmpty() || passwordInput.isEmpty()) return false
 
         val userBytes = derivePbkdf2(trimmedUser)

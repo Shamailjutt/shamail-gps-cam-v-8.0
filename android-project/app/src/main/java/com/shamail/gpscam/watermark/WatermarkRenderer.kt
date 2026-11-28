@@ -23,6 +23,7 @@ import com.shamail.gpscam.data.GpsSnapshot
 import com.shamail.gpscam.data.WatermarkConfig
 import com.shamail.gpscam.data.WatermarkPosition
 import com.shamail.gpscam.data.WatermarkSize
+import com.shamail.gpscam.data.WatermarkStyle
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -36,12 +37,20 @@ object WatermarkRenderer {
 
     private const val CREATED_BY_LABEL = "Created by:"
     private const val URDU_FOOTER_TEXT = "شمائل احمد رندھاوا) پیرا فورس سرائے عالمگیر"
+    private const val GPS_MAP_CAMERA_TITLE = "GPS Map Camera"
+    private const val GPS_MAP_CAMERA_NOTE = "Note : Captured by GPS Map Camera"
 
     @Volatile
     private var assetUrduTypeface: Typeface? = null
 
     @Volatile
     private var assetUrduChecked: Boolean = false
+
+    @Volatile
+    private var cachedMapCameraLogoBitmap: Bitmap? = null
+
+    @Volatile
+    private var mapCameraLogoChecked: Boolean = false
 
     private val systemUrduTypeface: Typeface by lazy {
         val fontPaths = listOf(
@@ -85,7 +94,20 @@ object WatermarkRenderer {
         return assetUrduTypeface ?: systemUrduTypeface
     }
 
+    fun ensureMapCameraLogoLoaded(context: Context): Bitmap? {
+        val existing = cachedMapCameraLogoBitmap
+        if (existing != null && !existing.isRecycled) return existing
+        if (!mapCameraLogoChecked) {
+            mapCameraLogoChecked = true
+            cachedMapCameraLogoBitmap = runCatching {
+                BitmapFactory.decodeResource(context.resources, R.drawable.gps_map_camera_logo)
+            }.getOrNull()
+        }
+        return cachedMapCameraLogoBitmap
+    }
+
     fun loadLogoBitmap(context: Context, config: WatermarkConfig): Bitmap? {
+        ensureMapCameraLogoLoaded(context)
         if (!assetUrduChecked) {
             assetUrduChecked = true
             val candidates = listOf(
@@ -153,6 +175,28 @@ object WatermarkRenderer {
         val footerZoneHeight: Float
     )
 
+    private data class MeasuredGpsMapCameraLayout(
+        val outerMargin: Float,
+        val unit: Float,
+        val cornerRadius: Float,
+        val tabCornerRadius: Float,
+        val mapRect: RectF,
+        val infoCardRect: RectF,
+        val headerTabRect: RectF,
+        val headerIconRect: RectF,
+        val headerTitleLayout: StaticLayout,
+        val padX: Float,
+        val padTop: Float,
+        val titleGap: Float,
+        val detailGap: Float,
+        val totalVisualHeight: Float,
+        val locationLayout: StaticLayout?,
+        val addressLayout: StaticLayout?,
+        val coordLayout: StaticLayout?,
+        val dateTimeLayout: StaticLayout?,
+        val noteLayout: StaticLayout
+    )
+
     fun renderOntoBitmap(
         source: Bitmap,
         config: WatermarkConfig,
@@ -161,7 +205,8 @@ object WatermarkRenderer {
         captureMillis: Long = System.currentTimeMillis(),
         @Suppress("UNUSED_PARAMETER") forceOpaqueBackground: Boolean = false,
         replaceExistingWatermark: Boolean = false,
-        oldGpsForRemoval: GpsSnapshot? = null
+        oldGpsForRemoval: GpsSnapshot? = null,
+        mapThumbnailBitmap: Bitmap? = null
     ): Bitmap {
         val output = source.copy(Bitmap.Config.ARGB_8888, true)
         if (!config.showWatermark) {
@@ -185,7 +230,8 @@ object WatermarkRenderer {
             logoBitmap = logoBitmap,
             nowMillis = captureMillis,
             anchorToBottom = true,
-            forceOpaqueBackground = false
+            forceOpaqueBackground = false,
+            mapThumbnailBitmap = mapThumbnailBitmap
         )
         return output
     }
@@ -224,22 +270,70 @@ object WatermarkRenderer {
         config: WatermarkConfig,
         gps: GpsSnapshot,
         logoBitmap: Bitmap?,
-        captureMillis: Long
+        captureMillis: Long,
+        mapThumbnailBitmap: Bitmap? = null
     ): VideoWatermarkStrip? {
         if (!config.showWatermark || videoWidth < 64 || videoHeight < 64) return null
 
+        val wF = videoWidth.toFloat()
+        val hF = videoHeight.toFloat()
+
+        if (config.watermarkStyle == WatermarkStyle.GPS_MAP_CAMERA) {
+            val measured = measureGpsMapCameraLayout(
+                containerWidth = wF,
+                containerHeight = hF,
+                config = config,
+                gps = gps,
+                nowMillis = captureMillis,
+                anchorToBottom = true
+            )
+            val unionTop = minOf(measured.mapRect.top, measured.headerTabRect.top, measured.infoCardRect.top)
+            val stripTop = (unionTop - 6f).toInt().coerceIn(0, videoHeight - 2)
+            val stripHeight = (videoHeight - stripTop).coerceAtLeast(2)
+
+            val stripBitmap = Bitmap.createBitmap(videoWidth, stripHeight, Bitmap.Config.ARGB_8888)
+            val canvas = Canvas(stripBitmap)
+            canvas.save()
+            canvas.translate(0f, -stripTop.toFloat())
+            drawGpsMapCameraWatermark(
+                canvas = canvas,
+                measured = measured,
+                config = config,
+                gps = gps,
+                mapThumbnailBitmap = mapThumbnailBitmap
+            )
+            canvas.restore()
+
+            val unionRect = RectF(measured.mapRect).apply {
+                union(measured.infoCardRect)
+                union(measured.headerTabRect)
+            }
+            val cardNorm = RectF(
+                unionRect.left / wF,
+                unionRect.top / hF,
+                unionRect.right / wF,
+                unionRect.bottom / hF
+            )
+            return VideoWatermarkStrip(
+                stripBitmap = stripBitmap,
+                stripTopFraction = stripTop.toFloat() / hF,
+                stripHeightFraction = stripHeight.toFloat() / hF,
+                cardNormRect = cardNorm,
+                logoNormRect = null,
+                cornerRadiusNormX = measured.cornerRadius / wF,
+                cornerRadiusNormY = measured.cornerRadius / hF
+            )
+        }
+
         val measured = measureOverlayLayout(
-            containerWidth = videoWidth.toFloat(),
-            containerHeight = videoHeight.toFloat(),
+            containerWidth = wF,
+            containerHeight = hF,
             config = config,
             gps = gps,
             nowMillis = captureMillis,
             anchorToBottom = true
         )
         val bounds = measured.bounds
-        val wF = videoWidth.toFloat()
-        val hF = videoHeight.toFloat()
-
         val cardRect = bounds.cardRect
         val logoRect = bounds.logoRect
 
@@ -260,7 +354,8 @@ object WatermarkRenderer {
             logoBitmap = logoBitmap,
             nowMillis = captureMillis,
             anchorToBottom = true,
-            forceOpaqueBackground = false
+            forceOpaqueBackground = false,
+            mapThumbnailBitmap = mapThumbnailBitmap
         )
         canvas.restore()
 
@@ -294,9 +389,32 @@ object WatermarkRenderer {
         logoBitmap: Bitmap?,
         nowMillis: Long = System.currentTimeMillis(),
         anchorToBottom: Boolean = true,
-        @Suppress("UNUSED_PARAMETER") forceOpaqueBackground: Boolean = false
+        @Suppress("UNUSED_PARAMETER") forceOpaqueBackground: Boolean = false,
+        mapThumbnailBitmap: Bitmap? = null
     ): Float {
         if (!config.showWatermark || containerWidth <= 10f) return 0f
+
+        if (config.watermarkStyle == WatermarkStyle.GPS_MAP_CAMERA) {
+            val measured = measureGpsMapCameraLayout(
+                containerWidth = containerWidth,
+                containerHeight = containerHeight,
+                config = config,
+                gps = gps,
+                nowMillis = nowMillis,
+                anchorToBottom = anchorToBottom
+            )
+            if (canvas == null) {
+                return measured.totalVisualHeight + if (anchorToBottom) measured.outerMargin * 2f else 0f
+            }
+            drawGpsMapCameraWatermark(
+                canvas = canvas,
+                measured = measured,
+                config = config,
+                gps = gps,
+                mapThumbnailBitmap = mapThumbnailBitmap
+            )
+            return measured.totalVisualHeight
+        }
 
         val measured = measureOverlayLayout(
             containerWidth = containerWidth,
@@ -694,6 +812,429 @@ object WatermarkRenderer {
         )
     }
 
+    private fun measureGpsMapCameraLayout(
+        containerWidth: Float,
+        containerHeight: Float,
+        config: WatermarkConfig,
+        gps: GpsSnapshot,
+        nowMillis: Long,
+        anchorToBottom: Boolean
+    ): MeasuredGpsMapCameraLayout {
+        val outerMargin = (containerWidth * 0.025f).coerceAtLeast(8f)
+        val availableWidth = (containerWidth - outerMargin * 2f).coerceAtLeast(140f)
+        val baseFraction = when (config.watermarkSize) {
+            WatermarkSize.SMALL -> 0.80f
+            WatermarkSize.MEDIUM -> 0.94f
+            WatermarkSize.LARGE -> 0.98f
+        }
+        val isFullLandscapePhoto =
+            anchorToBottom && containerHeight >= containerWidth * 0.45f && containerWidth > containerHeight
+        val totalWidth = if (isFullLandscapePhoto) {
+            min(availableWidth * baseFraction, containerHeight * 1.58f).coerceAtLeast(180f)
+        } else {
+            availableWidth * baseFraction
+        }
+
+        val unit = (totalWidth / 460f) * config.fontScale
+        val mapInfoGap = (7f * unit).coerceAtLeast(4f)
+        val mapWidth = (totalWidth * 0.235f).coerceIn(84f * unit, 122f * unit)
+        val infoWidth = (totalWidth - mapWidth - mapInfoGap).coerceAtLeast(120f)
+
+        val cornerRadius = (10f * unit).coerceAtLeast(7f)
+        val tabCornerRadius = (7f * unit).coerceAtLeast(5f)
+        val padX = (14f * unit).coerceAtLeast(8f)
+        val padTop = (12f * unit).coerceAtLeast(7f)
+        val padBottom = (11f * unit).coerceAtLeast(7f)
+        val titleGap = 4.5f * unit
+        val detailGap = 3.2f * unit
+
+        val shadowRadius = (1.5f * unit).coerceAtLeast(0.8f)
+        val shadowDy = (0.7f * unit).coerceAtLeast(0.4f)
+        val shadowColor = Color.argb(130, 0, 0, 0)
+        val primaryTextColor = Color.WHITE
+        val secondaryTextColor = Color.parseColor("#F1F5F9")
+
+        // Small header tab at top-right: small app icon + small "GPS Map Camera" text
+        val headerTextSize = (10.5f * unit).coerceAtLeast(7.5f)
+        val headerPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = primaryTextColor
+            textSize = headerTextSize
+            typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.NORMAL)
+            setShadowLayer(shadowRadius, 0f, shadowDy, shadowColor)
+        }
+        val headerIconSize = (14f * unit).coerceAtLeast(9f)
+        val headerIconGap = (5.5f * unit).coerceAtLeast(3.5f)
+        val headerPadX = (8f * unit).coerceAtLeast(5f)
+        val headerPadY = (4f * unit).coerceAtLeast(3f)
+        val maxHeaderTextW = (infoWidth * 0.56f).toInt().coerceAtLeast(40)
+        val desiredHeaderW = ceil(Layout.getDesiredWidth(GPS_MAP_CAMERA_TITLE, headerPaint)).toInt().coerceIn(1, maxHeaderTextW)
+        val headerTitleLayout = buildLtrLayout(GPS_MAP_CAMERA_TITLE, headerPaint, desiredHeaderW, 1)
+        val headerTitleActualW = (headerTitleLayout.getLineRight(0) - headerTitleLayout.getLineLeft(0))
+            .coerceAtLeast(1f)
+        val headerTabWidth = min(
+            infoWidth * 0.68f,
+            headerPadX * 2f + headerIconSize + headerIconGap + headerTitleActualW
+        )
+        val headerTabHeight = maxOf(headerIconSize, headerTitleLayout.height.toFloat()) + headerPadY * 2f
+
+        val headlinePaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = primaryTextColor
+            textSize = 18.5f * unit
+            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+            setShadowLayer(shadowRadius, 0f, shadowDy, shadowColor)
+        }
+        val bodyPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = secondaryTextColor
+            textSize = 11.6f * unit
+            typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.NORMAL)
+            setShadowLayer(shadowRadius, 0f, shadowDy, shadowColor)
+        }
+
+        val innerTextWidth = (infoWidth - padX * 2f).toInt().coerceAtLeast(80)
+        var contentH = padTop
+
+        val locationLayout = if (config.showLocationTitle) {
+            buildLtrLayout(buildLocationHeadlineWithFlag(gps), headlinePaint, innerTextWidth, 2)
+        } else null
+        if (locationLayout != null) {
+            contentH += locationLayout.height + titleGap
+        }
+
+        val addressLayout = if (config.showFullAddress) {
+            buildLtrLayout(gps.buildFullAddressLine(), bodyPaint, innerTextWidth, 3)
+        } else null
+        if (addressLayout != null) {
+            contentH += addressLayout.height + detailGap
+        }
+
+        val coordLayout = if (config.showCoordinates) {
+            buildLtrLayout(formatWatermarkCoordinatesLine(config, gps), bodyPaint, innerTextWidth, 2)
+        } else null
+        if (coordLayout != null) {
+            contentH += coordLayout.height + detailGap
+        }
+
+        val dateTimeLayout = if (config.showDateTime) {
+            buildLtrLayout(formatWatermarkDateTimeLine(config, gps, nowMillis), bodyPaint, innerTextWidth, 2)
+        } else null
+        if (dateTimeLayout != null) {
+            contentH += dateTimeLayout.height + detailGap
+        }
+
+        val noteLayout = buildLtrLayout(GPS_MAP_CAMERA_NOTE, bodyPaint, innerTextWidth, 1)
+        contentH += noteLayout.height + padBottom
+
+        val cardHeight = maxOf(contentH, mapWidth * 0.92f)
+        val totalVisualHeight = headerTabHeight + cardHeight
+
+        val groupLeft = when (config.watermarkPosition) {
+            WatermarkPosition.BOTTOM_LEFT -> outerMargin
+            WatermarkPosition.BOTTOM_CENTER -> (containerWidth - totalWidth) / 2f
+            WatermarkPosition.BOTTOM_RIGHT -> containerWidth - outerMargin - totalWidth
+        }
+        val cardTop = if (anchorToBottom) {
+            (containerHeight - outerMargin - cardHeight).coerceAtLeast(headerTabHeight + 4f)
+        } else {
+            headerTabHeight
+        }
+        val cardBottom = cardTop + cardHeight
+
+        val mapRect = RectF(groupLeft, cardTop, groupLeft + mapWidth, cardBottom)
+        val infoLeft = mapRect.right + mapInfoGap
+        val infoCardRect = RectF(infoLeft, cardTop, infoLeft + infoWidth, cardBottom)
+        val headerTabRect = RectF(
+            infoCardRect.right - headerTabWidth,
+            infoCardRect.top - headerTabHeight,
+            infoCardRect.right,
+            infoCardRect.top
+        )
+        val iconLeft = headerTabRect.left + headerPadX
+        val iconTop = headerTabRect.centerY() - headerIconSize / 2f
+        val headerIconRect = RectF(iconLeft, iconTop, iconLeft + headerIconSize, iconTop + headerIconSize)
+
+        return MeasuredGpsMapCameraLayout(
+            outerMargin = outerMargin,
+            unit = unit,
+            cornerRadius = cornerRadius,
+            tabCornerRadius = tabCornerRadius,
+            mapRect = mapRect,
+            infoCardRect = infoCardRect,
+            headerTabRect = headerTabRect,
+            headerIconRect = headerIconRect,
+            headerTitleLayout = headerTitleLayout,
+            padX = padX,
+            padTop = padTop,
+            titleGap = titleGap,
+            detailGap = detailGap,
+            totalVisualHeight = totalVisualHeight,
+            locationLayout = locationLayout,
+            addressLayout = addressLayout,
+            coordLayout = coordLayout,
+            dateTimeLayout = dateTimeLayout,
+            noteLayout = noteLayout
+        )
+    }
+
+    private fun drawGpsMapCameraWatermark(
+        canvas: Canvas,
+        measured: MeasuredGpsMapCameraLayout,
+        config: WatermarkConfig,
+        gps: GpsSnapshot,
+        mapThumbnailBitmap: Bitmap?
+    ) {
+        val unit = measured.unit
+        val alphaInt = ((config.watermarkOpacity.coerceIn(30, 95) / 100f) * 255f).toInt()
+        val cardFillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.argb(alphaInt, 10, 10, 12)
+            style = Paint.Style.FILL
+        }
+        val tabFillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.argb((alphaInt * 0.92f).toInt().coerceIn(60, 240), 26, 26, 28)
+            style = Paint.Style.FILL
+        }
+
+        // 1. Draw left-side satellite map thumbnail (or honest unavailable fallback)
+        val resolvedMapBmp = when {
+            mapThumbnailBitmap != null && !mapThumbnailBitmap.isRecycled -> mapThumbnailBitmap
+            gps.hasFix -> SatelliteMapThumbnailProvider.getCached(gps.latitude, gps.longitude)
+            else -> null
+        }
+        drawGpsMapThumbnailBox(
+            canvas = canvas,
+            mapRect = measured.mapRect,
+            cornerRadius = measured.cornerRadius,
+            unit = unit,
+            alphaInt = alphaInt,
+            hasGpsFix = gps.hasFix,
+            satelliteBitmap = resolvedMapBmp
+        )
+
+        // 2. Draw right-side main info card with squared top-right corner beneath header tab
+        val r = measured.cornerRadius
+        val cardRect = measured.infoCardRect
+        val cardPath = Path().apply {
+            addRoundRect(
+                cardRect,
+                floatArrayOf(r, r, 0f, 0f, r, r, r, r),
+                Path.Direction.CW
+            )
+        }
+        canvas.drawPath(cardPath, cardFillPaint)
+
+        // 3. Draw small top-right header tab: [small icon] GPS Map Camera
+        val tr = measured.tabCornerRadius
+        val tabRect = measured.headerTabRect
+        val tabPath = Path().apply {
+            addRoundRect(
+                tabRect,
+                floatArrayOf(tr, tr, tr, tr, 0f, 0f, 0f, 0f),
+                Path.Direction.CW
+            )
+        }
+        canvas.drawPath(tabPath, tabFillPaint)
+
+        val iconBmp = cachedMapCameraLogoBitmap
+        val iconRect = measured.headerIconRect
+        if (iconBmp != null && !iconBmp.isRecycled) {
+            canvas.save()
+            val iconClip = Path().apply {
+                val ir = (3f * unit).coerceAtLeast(2f)
+                addRoundRect(iconRect, ir, ir, Path.Direction.CW)
+            }
+            canvas.clipPath(iconClip)
+            val bmpPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+            canvas.drawBitmap(iconBmp, null, iconRect, bmpPaint)
+            canvas.restore()
+        }
+
+        val titleLayout = measured.headerTitleLayout
+        val titleDrawX = iconRect.right + (5.5f * unit).coerceAtLeast(3.5f) - titleLayout.getLineLeft(0)
+        val titleDrawY = tabRect.centerY() - (titleLayout.height / 2f)
+        canvas.save()
+        canvas.translate(titleDrawX, titleDrawY)
+        titleLayout.draw(canvas)
+        canvas.restore()
+
+        // 4. Draw right-side GPS text stack inside card
+        val textStartX = cardRect.left + measured.padX
+        var drawY = cardRect.top + measured.padTop
+
+        measured.locationLayout?.let { layout ->
+            canvas.save()
+            canvas.translate(textStartX, drawY)
+            layout.draw(canvas)
+            canvas.restore()
+            drawY += layout.height + measured.titleGap
+        }
+
+        measured.addressLayout?.let { layout ->
+            canvas.save()
+            canvas.translate(textStartX, drawY)
+            layout.draw(canvas)
+            canvas.restore()
+            drawY += layout.height + measured.detailGap
+        }
+
+        measured.coordLayout?.let { layout ->
+            canvas.save()
+            canvas.translate(textStartX, drawY)
+            layout.draw(canvas)
+            canvas.restore()
+            drawY += layout.height + measured.detailGap
+        }
+
+        measured.dateTimeLayout?.let { layout ->
+            canvas.save()
+            canvas.translate(textStartX, drawY)
+            layout.draw(canvas)
+            canvas.restore()
+            drawY += layout.height + measured.detailGap
+        }
+
+        canvas.save()
+        canvas.translate(textStartX, drawY)
+        measured.noteLayout.draw(canvas)
+        canvas.restore()
+    }
+
+    private fun drawGpsMapThumbnailBox(
+        canvas: Canvas,
+        mapRect: RectF,
+        cornerRadius: Float,
+        unit: Float,
+        alphaInt: Int,
+        hasGpsFix: Boolean,
+        satelliteBitmap: Bitmap?
+    ) {
+        canvas.save()
+        val clipPath = Path().apply {
+            addRoundRect(mapRect, cornerRadius, cornerRadius, Path.Direction.CW)
+        }
+        canvas.clipPath(clipPath)
+
+        if (satelliteBitmap != null && !satelliteBitmap.isRecycled && satelliteBitmap.width > 0 && satelliteBitmap.height > 0) {
+            val dstRatio = (mapRect.width() / mapRect.height()).coerceAtLeast(0.2f)
+            val srcW = satelliteBitmap.width.toFloat()
+            val srcH = satelliteBitmap.height.toFloat()
+            val srcRatio = srcW / srcH
+            val srcRect = if (srcRatio > dstRatio) {
+                val cropW = (srcH * dstRatio).toInt().coerceIn(1, satelliteBitmap.width)
+                val left = (satelliteBitmap.width - cropW) / 2
+                Rect(left, 0, left + cropW, satelliteBitmap.height)
+            } else {
+                val cropH = (srcW / dstRatio).toInt().coerceIn(1, satelliteBitmap.height)
+                val top = (satelliteBitmap.height - cropH) / 2
+                Rect(0, top, satelliteBitmap.width, top + cropH)
+            }
+            val bmpPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+            canvas.drawBitmap(satelliteBitmap, srcRect, mapRect, bmpPaint)
+
+            // Crisp red location pin centered on the actual location
+            val pinSize = min(mapRect.width(), mapRect.height()) * 0.30f
+            drawRedLocationPin(
+                canvas = canvas,
+                cx = mapRect.centerX(),
+                tipY = mapRect.centerY() + pinSize * 0.16f,
+                pinHeight = pinSize
+            )
+        } else {
+            // Honest fallback when satellite Maps API is unavailable or GPS fix is not acquired yet
+            val fallbackBg = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.argb(alphaInt, 22, 26, 32)
+                style = Paint.Style.FILL
+            }
+            canvas.drawRect(mapRect, fallbackBg)
+
+            val pinHeight = min(mapRect.width(), mapRect.height()) * 0.28f
+            drawRedLocationPin(
+                canvas = canvas,
+                cx = mapRect.centerX(),
+                tipY = mapRect.centerY() - (4f * unit),
+                pinHeight = pinHeight
+            )
+
+            val msg = if (hasGpsFix) "Map\nUnavailable" else "No GPS\nFix"
+            val msgPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.parseColor("#CBD5E1")
+                textSize = (9.5f * unit).coerceAtLeast(7f)
+                typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+            }
+            val msgWidth = (mapRect.width() - 10f * unit).toInt().coerceAtLeast(32)
+            val msgLayout = StaticLayout.Builder.obtain(msg, 0, msg.length, msgPaint, msgWidth)
+                .setAlignment(Layout.Alignment.ALIGN_CENTER)
+                .setIncludePad(false)
+                .setMaxLines(2)
+                .build()
+            canvas.save()
+            canvas.translate(mapRect.centerX() - msgWidth / 2f, mapRect.centerY() + (2f * unit))
+            msgLayout.draw(canvas)
+            canvas.restore()
+        }
+        canvas.restore()
+
+        val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.argb(85, 255, 255, 255)
+            style = Paint.Style.STROKE
+            strokeWidth = (1.1f * unit).coerceAtLeast(1f)
+        }
+        canvas.drawRoundRect(mapRect, cornerRadius, cornerRadius, borderPaint)
+    }
+
+    private fun drawRedLocationPin(
+        canvas: Canvas,
+        cx: Float,
+        tipY: Float,
+        pinHeight: Float
+    ) {
+        val h = pinHeight.coerceAtLeast(14f)
+        val r = h * 0.34f
+        val cy = tipY - h + r
+
+        val pinPath = Path().apply {
+            moveTo(cx, tipY)
+            cubicTo(
+                cx - r * 0.45f, tipY - h * 0.30f,
+                cx - r * 1.15f, cy + r * 0.45f,
+                cx - r, cy
+            )
+            arcTo(RectF(cx - r, cy - r, cx + r, cy + r), 180f, 180f, false)
+            cubicTo(
+                cx + r * 1.15f, cy + r * 0.45f,
+                cx + r * 0.45f, tipY - h * 0.30f,
+                cx, tipY
+            )
+            close()
+        }
+
+        val shadowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.argb(110, 0, 0, 0)
+            style = Paint.Style.FILL
+        }
+        canvas.drawOval(
+            RectF(cx - r * 0.55f, tipY - r * 0.18f, cx + r * 0.55f, tipY + r * 0.22f),
+            shadowPaint
+        )
+
+        val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.parseColor("#EA4335")
+            style = Paint.Style.FILL
+        }
+        canvas.drawPath(pinPath, fillPaint)
+
+        val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.WHITE
+            style = Paint.Style.STROKE
+            strokeWidth = (h * 0.065f).coerceAtLeast(1.2f)
+        }
+        canvas.drawPath(pinPath, strokePaint)
+
+        val innerDotPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.WHITE
+            style = Paint.Style.FILL
+        }
+        canvas.drawCircle(cx, cy, r * 0.36f, innerDotPaint)
+    }
+
     /**
      * Reconstructs the area previously occupied by a baked-in watermark card & upper-right circular logo
      * from clean surrounding pixels so a newly rendered semi-transparent watermark keeps its natural
@@ -709,31 +1250,60 @@ object WatermarkRenderer {
         val h = target.height
         if (w < 64 || h < 64) return
 
-        val oldMeasured = measureOverlayLayout(
-            containerWidth = w.toFloat(),
-            containerHeight = h.toFloat(),
-            config = config,
-            gps = oldGps,
-            nowMillis = nowMillis,
-            anchorToBottom = true
-        )
+        val oldCardRect: RectF
+        val oldLogoRect: RectF?
+        val oldCornerRadius: Float
+        val unit: Float
+        val outerMargin: Float
 
-        val oldBounds = oldMeasured.bounds
-        val unit = oldBounds.unit
-        val cardLeft = oldBounds.cardRect.left
-        val cardRight = oldBounds.cardRect.right
-        val cardBottom = oldBounds.cardRect.bottom
+        if (config.watermarkStyle == WatermarkStyle.GPS_MAP_CAMERA) {
+            val oldMeasured = measureGpsMapCameraLayout(
+                containerWidth = w.toFloat(),
+                containerHeight = h.toFloat(),
+                config = config,
+                gps = oldGps,
+                nowMillis = nowMillis,
+                anchorToBottom = true
+            )
+            oldCardRect = RectF(oldMeasured.mapRect).apply {
+                union(oldMeasured.infoCardRect)
+                union(oldMeasured.headerTabRect)
+            }
+            oldLogoRect = null
+            oldCornerRadius = oldMeasured.cornerRadius
+            unit = oldMeasured.unit
+            outerMargin = oldMeasured.outerMargin
+        } else {
+            val oldMeasured = measureOverlayLayout(
+                containerWidth = w.toFloat(),
+                containerHeight = h.toFloat(),
+                config = config,
+                gps = oldGps,
+                nowMillis = nowMillis,
+                anchorToBottom = true
+            )
+            val oldBounds = oldMeasured.bounds
+            oldCardRect = oldBounds.cardRect
+            oldLogoRect = oldBounds.logoRect
+            oldCornerRadius = oldBounds.cornerRadius
+            unit = oldBounds.unit
+            outerMargin = oldBounds.outerMargin
+        }
+
+        val cardLeft = oldCardRect.left
+        val cardRight = oldCardRect.right
+        val cardBottom = oldCardRect.bottom
 
         // Use pixel luminance detection when the baked card's top border sits higher than oldGps estimate
         val detectedCardTop = detectBakedCardTop(
             bitmap = target,
-            cardRect = oldBounds.cardRect,
-            logoRect = oldBounds.logoRect,
+            cardRect = oldCardRect,
+            logoRect = oldLogoRect,
             unit = unit,
-            outerMargin = oldBounds.outerMargin
+            outerMargin = outerMargin
         )
 
-        val effectiveCardTop = minOf(oldBounds.cardRect.top, detectedCardTop)
+        val effectiveCardTop = minOf(oldCardRect.top, detectedCardTop)
         val pad = (3f * unit).coerceAtLeast(3f)
 
         val patchCard = RectF(
@@ -744,8 +1314,8 @@ object WatermarkRenderer {
         )
         if (patchCard.width() < 8f || patchCard.height() < 8f) return
 
-        val effectiveLogoRect = oldBounds.logoRect?.let { lr ->
-            val shiftY = effectiveCardTop - oldBounds.cardRect.top
+        val effectiveLogoRect = oldLogoRect?.let { lr ->
+            val shiftY = effectiveCardTop - oldCardRect.top
             val shiftedTop = lr.top + shiftY
             val unionTop = minOf(lr.top, shiftedTop)
             val unionBottom = maxOf(lr.bottom, shiftedTop + lr.height())
@@ -843,7 +1413,7 @@ object WatermarkRenderer {
         patchBitmap.setPixels(gridPixels, 0, gridW, 0, 0, gridW, gridH)
 
         val clipPath = Path().apply {
-            val radius = oldBounds.cornerRadius + pad
+            val radius = oldCornerRadius + pad
             addRoundRect(patchCard, radius, radius, Path.Direction.CW)
             if (effectiveLogoRect != null) {
                 addCircle(

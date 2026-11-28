@@ -7,6 +7,7 @@ import android.util.AttributeSet
 import android.view.View
 import com.shamail.gpscam.data.GpsSnapshot
 import com.shamail.gpscam.data.WatermarkConfig
+import com.shamail.gpscam.data.WatermarkStyle
 import kotlin.math.ceil
 
 class WatermarkPreviewView @JvmOverloads constructor(
@@ -45,6 +46,15 @@ class WatermarkPreviewView @JvmOverloads constructor(
         logoBitmap = newLogo
         nowMillis = currentMillis
 
+        if (config.watermarkStyle == WatermarkStyle.GPS_MAP_CAMERA) {
+            WatermarkRenderer.ensureMapCameraLogoLoaded(context)
+            if (gps.hasFix && SatelliteMapThumbnailProvider.getCached(gps.latitude, gps.longitude) == null) {
+                SatelliteMapThumbnailProvider.fetchAsync(context, gps.latitude, gps.longitude) {
+                    invalidate()
+                }
+            }
+        }
+
         if (layoutMayChange) {
             requestLayout()
         }
@@ -74,6 +84,11 @@ class WatermarkPreviewView @JvmOverloads constructor(
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
         if (!config.showWatermark) return
+        val mapThumb = if (config.watermarkStyle == WatermarkStyle.GPS_MAP_CAMERA && gps.hasFix) {
+            SatelliteMapThumbnailProvider.getCached(gps.latitude, gps.longitude)
+        } else {
+            null
+        }
         WatermarkRenderer.drawWatermarkOverlay(
             canvas = canvas,
             containerWidth = width.toFloat(),
@@ -82,7 +97,8 @@ class WatermarkPreviewView @JvmOverloads constructor(
             gps = gps,
             logoBitmap = logoBitmap,
             nowMillis = nowMillis,
-            anchorToBottom = false
+            anchorToBottom = false,
+            mapThumbnailBitmap = mapThumb
         )
     }
 }

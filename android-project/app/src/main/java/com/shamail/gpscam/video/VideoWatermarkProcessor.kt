@@ -29,6 +29,8 @@ import com.shamail.gpscam.data.GpsSnapshot
 import com.shamail.gpscam.data.TimestampMode
 import com.shamail.gpscam.data.VideoGpsKeyframe
 import com.shamail.gpscam.data.WatermarkConfig
+import com.shamail.gpscam.data.WatermarkStyle
+import com.shamail.gpscam.watermark.SatelliteMapThumbnailProvider
 import com.shamail.gpscam.watermark.WatermarkRenderer
 import java.io.File
 import java.nio.ByteBuffer
@@ -326,6 +328,7 @@ object VideoWatermarkProcessor {
             enc.start()
 
             val gl = GlVideoWatermarkSession(
+                appContext = context.applicationContext,
                 encoderSurface = encoderInputSurface,
                 outWidth = outWidth,
                 outHeight = outHeight,
@@ -495,6 +498,7 @@ object VideoWatermarkProcessor {
     }
 
     private class GlVideoWatermarkSession(
+        private val appContext: Context,
         encoderSurface: Surface,
         private val outWidth: Int,
         private val outHeight: Int,
@@ -821,13 +825,19 @@ object VideoWatermarkProcessor {
             // Force AUTO_DEVICE here so advancing frameWallMillis drives time progression cleanly
             // (essential both for live recordings and custom-timestamp post-edits).
             val frameConfig = config.copy(timestampMode = TimestampMode.AUTO_DEVICE)
+            val mapThumb = if (frameConfig.watermarkStyle == WatermarkStyle.GPS_MAP_CAMERA && activeGps.hasFix) {
+                SatelliteMapThumbnailProvider.getOrFetchBlocking(appContext, activeGps.latitude, activeGps.longitude)
+            } else {
+                null
+            }
             val strip = WatermarkRenderer.renderVideoOverlayStrip(
                 videoWidth = outWidth,
                 videoHeight = outHeight,
                 config = frameConfig,
                 gps = activeGps,
                 logoBitmap = logoBitmap,
-                captureMillis = frameWallMillis
+                captureMillis = frameWallMillis,
+                mapThumbnailBitmap = mapThumb
             ) ?: return
 
             stripTopNorm = strip.stripTopFraction

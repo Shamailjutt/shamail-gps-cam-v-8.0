@@ -20,6 +20,7 @@ import com.shamail.gpscam.data.GpsSnapshot
 import com.shamail.gpscam.data.LocationSource
 import com.shamail.gpscam.data.SavedLocationDatabase
 import com.shamail.gpscam.data.TimestampMode
+import com.shamail.gpscam.data.WatermarkStyle
 import com.shamail.gpscam.databinding.ActivityPhotoDetailBinding
 import com.shamail.gpscam.location.LocationInputResolver
 import com.shamail.gpscam.metadata.PhotoMetadataEngine
@@ -27,6 +28,7 @@ import com.shamail.gpscam.storage.EditablePhotoContext
 import com.shamail.gpscam.storage.EditableVideoContext
 import com.shamail.gpscam.storage.PhotoStorageManager
 import com.shamail.gpscam.ui.SequentialDateTimePicker
+import com.shamail.gpscam.watermark.SatelliteMapThumbnailProvider
 import com.shamail.gpscam.watermark.WatermarkRenderer
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -671,6 +673,15 @@ class PhotoDetailActivity : AppCompatActivity() {
             binding.btnSaveEditedCopy.isEnabled = false
             lifecycleScope.launch(Dispatchers.Default) {
                 val logoBmp = WatermarkRenderer.loadLogoBitmap(this@PhotoDetailActivity, previewCfg)
+                val mapThumb = if (previewCfg.watermarkStyle == WatermarkStyle.GPS_MAP_CAMERA && editedGps.hasFix) {
+                    SatelliteMapThumbnailProvider.getOrFetchBlocking(
+                        this@PhotoDetailActivity,
+                        editedGps.latitude,
+                        editedGps.longitude
+                    )
+                } else {
+                    null
+                }
                 val rendered = WatermarkRenderer.renderOntoBitmap(
                     source = vCtx.previewFrameBitmap,
                     config = previewCfg,
@@ -679,7 +690,8 @@ class PhotoDetailActivity : AppCompatActivity() {
                     captureMillis = normalizedMillis,
                     forceOpaqueBackground = false,
                     replaceExistingWatermark = !vCtx.hasCleanOriginal,
-                    oldGpsForRemoval = vCtx.gps
+                    oldGpsForRemoval = vCtx.gps,
+                    mapThumbnailBitmap = mapThumb
                 )
                 val formattedStamp = previewCfg.formatTimestamp(editedGps, normalizedMillis)
                 val locationLabel = if (editedGps.hasFix) editedGps.buildLocationHeadline() else "Location"
@@ -716,6 +728,15 @@ class PhotoDetailActivity : AppCompatActivity() {
         binding.btnSaveEditedCopy.isEnabled = false
         lifecycleScope.launch(Dispatchers.Default) {
             val logoBmp = WatermarkRenderer.loadLogoBitmap(this@PhotoDetailActivity, previewCfg)
+            val mapThumb = if (previewCfg.watermarkStyle == WatermarkStyle.GPS_MAP_CAMERA && editedGps.hasFix) {
+                SatelliteMapThumbnailProvider.getOrFetchBlocking(
+                    this@PhotoDetailActivity,
+                    editedGps.latitude,
+                    editedGps.longitude
+                )
+            } else {
+                null
+            }
             val rendered = WatermarkRenderer.renderOntoBitmap(
                 source = ctx.sourceBitmap,
                 config = previewCfg,
@@ -724,7 +745,8 @@ class PhotoDetailActivity : AppCompatActivity() {
                 captureMillis = normalizedMillis,
                 forceOpaqueBackground = false,
                 replaceExistingWatermark = !ctx.hasCleanOriginal,
-                oldGpsForRemoval = ctx.gps
+                oldGpsForRemoval = ctx.gps,
+                mapThumbnailBitmap = mapThumb
             )
             val formattedStamp = previewCfg.formatTimestamp(editedGps, normalizedMillis)
             val locationLabel = if (editedGps.hasFix) editedGps.buildLocationHeadline() else "Location"

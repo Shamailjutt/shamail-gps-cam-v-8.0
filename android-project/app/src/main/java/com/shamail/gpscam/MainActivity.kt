@@ -5,6 +5,7 @@ import android.annotation.SuppressLint
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.graphics.Typeface
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -12,9 +13,13 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.provider.Settings
+import android.view.Gravity
 import android.view.MotionEvent
+import android.view.ScaleGestureDetector
 import android.view.SoundEffectConstants
 import android.view.View
+import android.widget.LinearLayout
+import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
@@ -24,6 +29,7 @@ import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.Preview
+import androidx.camera.core.ZoomState
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.video.FallbackStrategy
 import androidx.camera.video.FileOutputOptions
@@ -34,7 +40,10 @@ import androidx.camera.video.Recording
 import androidx.camera.video.VideoCapture
 import androidx.camera.video.VideoRecordEvent
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.LiveData
+import androidx.lifecycle.Observer
 import androidx.lifecycle.lifecycleScope
+import com.google.android.material.slider.Slider
 import com.shamail.gpscam.data.AppPreferences
 import com.shamail.gpscam.data.AuthManager
 import com.shamail.gpscam.data.GpsSnapshot
@@ -78,8 +87,24 @@ class MainActivity : AppCompatActivity() {
     private var isRecordingVideo: Boolean = false
     private var isProcessingVideo: Boolean = false
     private var recordingStartElapsedMs: Long = 0L
-    private val recordedVideoGpsTimeline = mutableListOf<VideoGpsKeyframe>()
+    private var recordedVideoGpsTimeline = mutableListOf<VideoGpsKeyframe>()
     private var activeVideoCaptureGpsSeed: GpsSnapshot? = null
+
+    private var observedZoomLiveData: LiveData<ZoomState>? = null
+    private var currentZoomRatio: Float = 1.0f
+    private var minZoomRatio: Float = 1.0f
+    private var maxZoomRatio: Float = 1.0f
+    private var isUpdatingZoomUiFromCamera: Boolean = false
+    private var isDraggingZoomSlider: Boolean = false
+    private var supportedZoomPresets: List<Float> = emptyList()
+    private val zoomPresetViews = mutableListOf<Pair<Float, TextView>>()
+    private var isPinchingZoom: Boolean = false
+    private var pinchOccurredInGesture: Boolean = false
+    private lateinit var scaleGestureDetector: ScaleGestureDetector
+
+    private val zoomStateObserver = Observer<ZoomState> { state ->
+        onCameraZoomStateChanged(state)
+    }
 
     private val clockHandler = Handler(Looper.getMainLooper())
     private val clockTicker = object : Runnable {
@@ -274,15 +299,60 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        setupZoomControls()
+
+        scaleGestureDetector = ScaleGestureDetector(
+            this,
+            object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
+                override fun onScaleBegin(detector: ScaleGestureDetector): Boolean {
+                    isPinchingZoom = true
+                    pinchOccurredInGesture = true
+                    return maxZoomRatio > minZoomRatio + 0.05f
+                }
+
+                override fun onScale(detector: ScaleGestureDetector): Boolean {
+                    if (maxZoomRatio <= minZoomRatio + 0.05f) return false
+                    val factor = detector.scaleFactor
+                    if (!factor.isFinite() || factor <= 0f) return false
+                    val nextZoom = (currentZoomRatio * factor).coerceIn(minZoomRatio, maxZoomRatio)
+                    applyCameraZoomRatio(nextZoom)
+                    return true
+                }
+
+                override fun onScaleEnd(detector: ScaleGestureDetector) {
+                    isPinchingZoom = false
+                }
+            }
+        )
+
         binding.viewFinder.setOnTouchListener { view, event ->
-            if (event.action == MotionEvent.ACTION_UP) {
+            if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+                pinchOccurredInGesture = false
+            }
+            if (event.pointerCount > 1 || event.actionMasked == MotionEvent.ACTION_POINTER_DOWN) {
+                pinchOccurredInGesture = true
+            }
+
+            scaleGestureDetector.onTouchEvent(event)
+
+            if (event.actionMasked == MotionEvent.ACTION_UP &&
+                !isPinchingZoom &&
+                !pinchOccurredInGesture &&
+                binding.viewFinder.width > 0 &&
+                binding.viewFinder.height > 0
+            ) {
                 view.performClick()
                 val factory = binding.viewFinder.meteringPointFactory
                 val point = factory.createPoint(event.x, event.y)
-                val action = FocusMeteringAction.Builder(point, FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE)
+                val action = FocusMeteringAction.Builder(
+                    point,
+                    FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE
+                )
                     .setAutoCancelDuration(3, TimeUnit.SECONDS)
                     .build()
-                activeCamera?.cameraControl?.startFocusAndMetering(action)
+                runCatching {
+                    activeCamera?.cameraControl?.startFocusAndMetering(action)
+                }
             }
             true
         }
@@ -531,12 +601,223 @@ class MainActivity : AppCompatActivity() {
                 )
             }
             syncFlashUiWithHardware()
+            observeActiveCameraZoomState()
         } catch (e: Exception) {
+            observedZoomLiveData?.removeObserver(zoomStateObserver)
+            observedZoomLiveData = null
+            binding.llZoomControls.visibility = View.GONE
             Toast.makeText(
                 this,
                 "Unable to bind camera sensor: ${e.localizedMessage ?: "Error"}",
                 Toast.LENGTH_SHORT
             ).show()
+        }
+    }
+
+    private fun setupZoomControls() {
+        binding.btnZoomOut.setOnClickListener {
+            if (maxZoomRatio <= minZoomRatio + 0.05f) return@setOnClickListener
+            val nextZoom = when {
+                currentZoomRatio > 3.05f -> currentZoomRatio - 1.0f
+                currentZoomRatio > 1.05f -> maxOf(1.0f, currentZoomRatio - 0.5f)
+                else -> currentZoomRatio - 0.1f
+            }.coerceIn(minZoomRatio, maxZoomRatio)
+            applyCameraZoomRatio(nextZoom)
+        }
+
+        binding.btnZoomIn.setOnClickListener {
+            if (maxZoomRatio <= minZoomRatio + 0.05f) return@setOnClickListener
+            val nextZoom = when {
+                currentZoomRatio < 0.95f -> minOf(1.0f, currentZoomRatio + 0.1f)
+                currentZoomRatio < 2.95f -> currentZoomRatio + 0.5f
+                else -> currentZoomRatio + 1.0f
+            }.coerceIn(minZoomRatio, maxZoomRatio)
+            applyCameraZoomRatio(nextZoom)
+        }
+
+        binding.btnZoomReset.setOnClickListener {
+            if (maxZoomRatio <= minZoomRatio + 0.05f) return@setOnClickListener
+            val defaultZoom = 1.0f.coerceIn(minZoomRatio, maxZoomRatio)
+            applyCameraZoomRatio(defaultZoom)
+        }
+
+        binding.sliderZoom.addOnSliderTouchListener(object : Slider.OnSliderTouchListener {
+            override fun onStartTrackingTouch(slider: Slider) {
+                isDraggingZoomSlider = true
+            }
+
+            override fun onStopTrackingTouch(slider: Slider) {
+                isDraggingZoomSlider = false
+            }
+        })
+
+        binding.sliderZoom.addOnChangeListener { _, value, fromUser ->
+            if (fromUser && !isUpdatingZoomUiFromCamera) {
+                applyCameraZoomRatio(value, fromSlider = true)
+            }
+        }
+    }
+
+    private fun observeActiveCameraZoomState() {
+        observedZoomLiveData?.removeObserver(zoomStateObserver)
+        val zoomLiveData = activeCamera?.cameraInfo?.zoomState
+        observedZoomLiveData = zoomLiveData
+        if (zoomLiveData == null) {
+            binding.llZoomControls.visibility = View.GONE
+            return
+        }
+        zoomLiveData.observe(this, zoomStateObserver)
+    }
+
+    private fun onCameraZoomStateChanged(state: ZoomState) {
+        val rawMin = if (state.minZoomRatio.isFinite() && state.minZoomRatio > 0f) state.minZoomRatio else 1.0f
+        val rawMax = if (state.maxZoomRatio.isFinite() && state.maxZoomRatio >= rawMin) state.maxZoomRatio else rawMin
+        minZoomRatio = rawMin
+        maxZoomRatio = rawMax
+
+        if (maxZoomRatio <= minZoomRatio + 0.05f) {
+            currentZoomRatio = minZoomRatio
+            binding.llZoomControls.visibility = View.GONE
+            return
+        }
+
+        binding.llZoomControls.visibility = View.VISIBLE
+        val clampedZoom = (if (state.zoomRatio.isFinite()) state.zoomRatio else 1.0f)
+            .coerceIn(minZoomRatio, maxZoomRatio)
+        currentZoomRatio = clampedZoom
+
+        val presets = computeSupportedZoomPresets(minZoomRatio, maxZoomRatio)
+        if (presets != supportedZoomPresets) {
+            rebuildZoomPresetButtons(presets)
+        }
+        updateZoomUiVisuals(clampedZoom, updateSlider = !isDraggingZoomSlider)
+    }
+
+    private fun computeSupportedZoomPresets(minZoom: Float, maxZoom: Float): List<Float> {
+        val candidates = mutableListOf<Float>()
+        if (minZoom < 0.92f) {
+            if (minZoom <= 0.52f) {
+                candidates.add(0.5f)
+            } else {
+                val roundedMin = kotlin.math.round(minZoom * 10f) / 10f
+                if (roundedMin < 0.95f) {
+                    candidates.add(roundedMin)
+                }
+            }
+        }
+        listOf(1.0f, 2.0f, 5.0f).forEach { level ->
+            if (level >= minZoom - 0.02f && level <= maxZoom + 0.02f) {
+                candidates.add(level)
+            }
+        }
+        if (maxZoom in 2.95f..4.90f && candidates.none { kotlin.math.abs(it - 3.0f) < 0.1f }) {
+            candidates.add(3.0f)
+        }
+        if (candidates.isEmpty()) {
+            candidates.add(1.0f.coerceIn(minZoom, maxZoom))
+        }
+        return candidates
+            .distinctBy { kotlin.math.round(it * 10f).toInt() }
+            .sorted()
+    }
+
+    private fun rebuildZoomPresetButtons(presets: List<Float>) {
+        supportedZoomPresets = presets
+        zoomPresetViews.clear()
+        binding.llZoomPresets.removeAllViews()
+
+        val density = resources.displayMetrics.density
+        val marginPx = (3 * density).toInt()
+        val padH = (9 * density).toInt()
+
+        presets.forEach { preset ->
+            val label = if (kotlin.math.abs(preset - preset.toInt()) < 0.05f) {
+                "${preset.toInt()}x"
+            } else {
+                String.format(Locale.US, "%.1fx", preset)
+            }
+            val chip = TextView(this).apply {
+                text = label
+                textSize = 11f
+                setTypeface(typeface, Typeface.BOLD)
+                gravity = Gravity.CENTER
+                isClickable = true
+                isFocusable = true
+                setPadding(padH, 0, padH, 0)
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    LinearLayout.LayoutParams.MATCH_PARENT
+                ).apply {
+                    marginStart = marginPx
+                    marginEnd = marginPx
+                }
+                setOnClickListener {
+                    val target = preset.coerceIn(minZoomRatio, maxZoomRatio)
+                    applyCameraZoomRatio(target)
+                }
+            }
+            binding.llZoomPresets.addView(chip)
+            zoomPresetViews.add(preset to chip)
+        }
+    }
+
+    private fun applyCameraZoomRatio(targetRatio: Float, fromSlider: Boolean = false) {
+        val camera = activeCamera ?: return
+        if (maxZoomRatio <= minZoomRatio + 0.05f) return
+        val clamped = targetRatio.coerceIn(minZoomRatio, maxZoomRatio)
+        currentZoomRatio = clamped
+        updateZoomUiVisuals(clamped, updateSlider = !fromSlider)
+        try {
+            camera.cameraControl.setZoomRatio(clamped)
+        } catch (_: Exception) {
+            // Keep preview/capture/recording resilient if sensor rejects a transient zoom request
+        }
+    }
+
+    private fun updateZoomUiVisuals(zoomRatio: Float, updateSlider: Boolean) {
+        binding.tvZoomLevel.text = String.format(Locale.US, "%.1fx", zoomRatio)
+
+        val defaultZoom = 1.0f.coerceIn(minZoomRatio, maxZoomRatio)
+        val isAtDefault = kotlin.math.abs(zoomRatio - defaultZoom) <= 0.03f
+        binding.btnZoomReset.alpha = if (isAtDefault) 0.55f else 1.0f
+        binding.btnZoomOut.alpha = if (zoomRatio <= minZoomRatio + 0.02f) 0.45f else 1.0f
+        binding.btnZoomIn.alpha = if (zoomRatio >= maxZoomRatio - 0.02f) 0.45f else 1.0f
+
+        val closest = zoomPresetViews.minByOrNull { kotlin.math.abs(it.first - zoomRatio) }
+        val activeColor = ContextCompat.getColor(this, R.color.gold_on_primary)
+        val inactiveColor = ContextCompat.getColor(this, R.color.text_secondary)
+        zoomPresetViews.forEach { (preset, view) ->
+            val isSelected = closest != null &&
+                kotlin.math.abs(closest.first - preset) < 0.01f &&
+                kotlin.math.abs(preset - zoomRatio) <= 0.12f
+            if (isSelected) {
+                view.setBackgroundResource(R.drawable.bg_mode_tab_active)
+                view.setTextColor(activeColor)
+            } else {
+                view.background = null
+                view.setTextColor(inactiveColor)
+            }
+        }
+
+        if (updateSlider && maxZoomRatio > minZoomRatio + 0.05f) {
+            isUpdatingZoomUiFromCamera = true
+            try {
+                val slider = binding.sliderZoom
+                val safeFrom = minZoomRatio
+                val safeTo = maxZoomRatio
+                val safeVal = zoomRatio.coerceIn(safeFrom, safeTo)
+                // Keep Material Slider invariants (valueFrom < valueTo, value in range) valid at every step
+                slider.value = slider.value.coerceIn(slider.valueFrom, slider.valueTo)
+                if (slider.valueFrom > safeFrom) slider.valueFrom = safeFrom
+                if (slider.valueTo < safeTo) slider.valueTo = safeTo
+                slider.value = safeVal
+                slider.valueFrom = safeFrom
+                slider.valueTo = safeTo
+            } catch (_: Exception) {
+                // Guard against transient Material Slider state rounding issues
+            } finally {
+                isUpdatingZoomUiFromCamera = false
+            }
         }
     }
 

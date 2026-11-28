@@ -33,7 +33,8 @@ enum class WatermarkPosition {
 enum class WatermarkStyle {
     CLASSIC_CARD,
     COMPACT_STRIP,
-    MODERN_BANNER
+    MODERN_BANNER,
+    GPS_MAP_CAMERA
 }
 
 enum class WatermarkTextColor(val hex: String) {

@@ -19,11 +19,13 @@ import com.shamail.gpscam.data.SavedLocationDatabase
 import com.shamail.gpscam.data.TimestampMode
 import com.shamail.gpscam.data.VideoGpsKeyframe
 import com.shamail.gpscam.data.WatermarkConfig
+import com.shamail.gpscam.data.WatermarkStyle
 import com.shamail.gpscam.databinding.ActivityPostCaptureEditBinding
 import com.shamail.gpscam.location.LocationInputResolver
 import com.shamail.gpscam.metadata.PhotoMetadataEngine
 import com.shamail.gpscam.storage.PhotoStorageManager
 import com.shamail.gpscam.ui.SequentialDateTimePicker
+import com.shamail.gpscam.watermark.SatelliteMapThumbnailProvider
 import com.shamail.gpscam.watermark.WatermarkRenderer
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -518,12 +520,22 @@ class PostCaptureEditActivity : AppCompatActivity() {
         }
 
         lifecycleScope.launch(Dispatchers.Default) {
+            val mapThumb = if (workingConfig.watermarkStyle == WatermarkStyle.GPS_MAP_CAMERA && workingGps.hasFix) {
+                SatelliteMapThumbnailProvider.getOrFetchBlocking(
+                    this@PostCaptureEditActivity,
+                    workingGps.latitude,
+                    workingGps.longitude
+                )
+            } else {
+                null
+            }
             val rendered = WatermarkRenderer.renderOntoBitmap(
                 source = base,
                 config = workingConfig,
                 gps = workingGps,
                 logoBitmap = logoBitmap,
-                captureMillis = captureMomentMillis
+                captureMillis = captureMomentMillis,
+                mapThumbnailBitmap = mapThumb
             )
             withContext(Dispatchers.Main) {
                 val old = currentPreviewWatermarked

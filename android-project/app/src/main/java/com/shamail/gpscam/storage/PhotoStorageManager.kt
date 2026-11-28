@@ -27,10 +27,12 @@ import com.shamail.gpscam.data.VideoGpsKeyframe
 import com.shamail.gpscam.data.WatermarkConfig
 import com.shamail.gpscam.data.WatermarkPosition
 import com.shamail.gpscam.data.WatermarkSize
+import com.shamail.gpscam.data.WatermarkStyle
 import com.shamail.gpscam.metadata.PhotoMetadataEngine
 import com.shamail.gpscam.video.Mp4MetadataUpdater
 import com.shamail.gpscam.video.Mp4VideoMetadata
 import com.shamail.gpscam.video.VideoWatermarkProcessor
+import com.shamail.gpscam.watermark.SatelliteMapThumbnailProvider
 import com.shamail.gpscam.watermark.WatermarkRenderer
 import org.json.JSONArray
 import org.json.JSONObject
@@ -322,12 +324,18 @@ object PhotoStorageManager {
             config.resolveTimestampMillis(gps, captureDeviceMillis)
         )
         val logoBitmap = WatermarkRenderer.loadLogoBitmap(context, config)
+        val mapThumb = if (config.watermarkStyle == WatermarkStyle.GPS_MAP_CAMERA && gps.hasFix) {
+            SatelliteMapThumbnailProvider.getOrFetchBlocking(context, gps.latitude, gps.longitude)
+        } else {
+            null
+        }
         val watermarked = WatermarkRenderer.renderOntoBitmap(
             source = sourceBitmap,
             config = config,
             gps = gps,
             logoBitmap = logoBitmap,
-            captureMillis = displayedMillis
+            captureMillis = displayedMillis,
+            mapThumbnailBitmap = mapThumb
         )
 
         val fileStamp = PhotoMetadataEngine.formatFileStamp(displayedMillis)
@@ -613,6 +621,11 @@ object PhotoStorageManager {
             showWatermark = true
         )
         val logoBitmap = WatermarkRenderer.loadLogoBitmap(context, updatedConfig)
+        val mapThumb = if (updatedConfig.watermarkStyle == WatermarkStyle.GPS_MAP_CAMERA && editedGps.hasFix) {
+            SatelliteMapThumbnailProvider.getOrFetchBlocking(context, editedGps.latitude, editedGps.longitude)
+        } else {
+            null
+        }
         val cleanBaseForCopy = if (editable.hasCleanOriginal) {
             editable.sourceBitmap
         } else {
@@ -630,7 +643,8 @@ object PhotoStorageManager {
             logoBitmap = logoBitmap,
             captureMillis = normalizedEditedMillis,
             forceOpaqueBackground = false,
-            replaceExistingWatermark = false
+            replaceExistingWatermark = false,
+            mapThumbnailBitmap = mapThumb
         )
 
         val stamp = PhotoMetadataEngine.formatFileStamp(normalizedEditedMillis)
@@ -1636,6 +1650,7 @@ object PhotoStorageManager {
                     put("watermarkOpacity", config.watermarkOpacity)
                     put("fontScale", config.fontScale.toDouble())
                     put("watermarkPosition", config.watermarkPosition.name)
+                    put("watermarkStyle", config.watermarkStyle.name)
                     put("showLocationTitle", config.showLocationTitle)
                     put("showFullAddress", config.showFullAddress)
                     put("showCoordinates", config.showCoordinates)
@@ -1738,6 +1753,7 @@ object PhotoStorageManager {
         if (obj == null) return fallback
         val sizeStr = obj.optString("watermarkSize", fallback.watermarkSize.name)
         val posStr = obj.optString("watermarkPosition", fallback.watermarkPosition.name)
+        val styleStr = obj.optString("watermarkStyle", fallback.watermarkStyle.name)
         val coordStr = obj.optString("coordFormat", fallback.coordFormat.name)
         val logoPath = obj.optString("customLogoPath", "").ifBlank { null }
         return fallback.copy(
@@ -1749,6 +1765,7 @@ object PhotoStorageManager {
             watermarkOpacity = obj.optInt("watermarkOpacity", fallback.watermarkOpacity).coerceIn(30, 95),
             fontScale = obj.optDouble("fontScale", fallback.fontScale.toDouble()).toFloat().coerceIn(0.8f, 1.35f),
             watermarkPosition = runCatching { WatermarkPosition.valueOf(posStr) }.getOrDefault(fallback.watermarkPosition),
+            watermarkStyle = runCatching { WatermarkStyle.valueOf(styleStr) }.getOrDefault(fallback.watermarkStyle),
             showLocationTitle = obj.optBoolean("showLocationTitle", fallback.showLocationTitle),
             showFullAddress = obj.optBoolean("showFullAddress", fallback.showFullAddress),
             showCoordinates = obj.optBoolean("showCoordinates", fallback.showCoordinates),
@@ -2206,6 +2223,7 @@ object PhotoStorageManager {
                     put("watermarkOpacity", config.watermarkOpacity)
                     put("fontScale", config.fontScale.toDouble())
                     put("watermarkPosition", config.watermarkPosition.name)
+                    put("watermarkStyle", config.watermarkStyle.name)
                     put("showLocationTitle", config.showLocationTitle)
                     put("showFullAddress", config.showFullAddress)
                     put("showCoordinates", config.showCoordinates)
