@@ -17,6 +17,11 @@ import android.text.StaticLayout
 import android.text.TextDirectionHeuristics
 import android.text.TextPaint
 import android.text.TextUtils
+import android.util.LruCache
+import com.google.zxing.BarcodeFormat
+import com.google.zxing.EncodeHintType
+import com.google.zxing.qrcode.QRCodeWriter
+import com.google.zxing.qrcode.decoder.ErrorCorrectionLevel
 import com.shamail.gpscam.R
 import com.shamail.gpscam.data.CoordFormat
 import com.shamail.gpscam.data.GpsSnapshot
@@ -27,6 +32,7 @@ import com.shamail.gpscam.data.WatermarkStyle
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
+import java.util.EnumMap
 import java.util.Locale
 import java.util.TimeZone
 import kotlin.math.abs
@@ -39,6 +45,9 @@ object WatermarkRenderer {
     private const val URDU_FOOTER_TEXT = "شمائل احمد رندھاوا) پیرا فورس سرائے عالمگیر"
     private const val GPS_MAP_CAMERA_TITLE = "GPS Map Camera"
     private const val GPS_MAP_CAMERA_NOTE = "Note : Captured by GPS Map Camera"
+    private const val GPS_MAP_QR_CAPTION = "SCAN TO OPEN LOCATION"
+
+    private val qrBitmapCache = object : LruCache<String, Bitmap>(16) {}
 
     @Volatile
     private var assetUrduTypeface: Typeface? = null
@@ -993,7 +1002,7 @@ object WatermarkRenderer {
             style = Paint.Style.FILL
         }
 
-        // 1. Draw left-side satellite map thumbnail (or honest unavailable fallback)
+        // 1. Draw left-side satellite map thumbnail (or local QR code fallback for the photo's coordinates)
         val resolvedMapBmp = when {
             mapThumbnailBitmap != null && !mapThumbnailBitmap.isRecycled -> mapThumbnailBitmap
             gps.hasFix -> SatelliteMapThumbnailProvider.getCached(gps.latitude, gps.longitude)
@@ -1005,7 +1014,7 @@ object WatermarkRenderer {
             cornerRadius = measured.cornerRadius,
             unit = unit,
             alphaInt = alphaInt,
-            hasGpsFix = gps.hasFix,
+            gps = gps,
             satelliteBitmap = resolvedMapBmp
         )
 
@@ -1097,13 +1106,68 @@ object WatermarkRenderer {
         canvas.restore()
     }
 
+    private fun hasValidQrCoordinates(gps: GpsSnapshot): Boolean {
+        if (!gps.hasFix) return false
+        if (!gps.latitude.isFinite() || !gps.longitude.isFinite()) return false
+        if (gps.latitude !in -90.0..90.0 || gps.longitude !in -180.0..180.0) return false
+        if (abs(gps.latitude) < 1e-7 && abs(gps.longitude) < 1e-7) return false
+        return true
+    }
+
+    internal fun buildGoogleMapsQrUrl(latitude: Double, longitude: Double): String {
+        val latStr = String.format(Locale.US, "%.6f", latitude)
+        val lonStr = String.format(Locale.US, "%.6f", longitude)
+        return "https://www.google.com/maps/search/?api=1&query=$latStr%2C$lonStr"
+    }
+
+    internal fun getOrCreateLocationQrBitmap(latitude: Double, longitude: Double): Bitmap? {
+        val url = buildGoogleMapsQrUrl(latitude, longitude)
+        synchronized(qrBitmapCache) {
+            qrBitmapCache.get(url)?.let { cached ->
+                if (!cached.isRecycled) return cached
+            }
+        }
+        return runCatching {
+            val hints = EnumMap<EncodeHintType, Any>(EncodeHintType::class.java).apply {
+                put(EncodeHintType.ERROR_CORRECTION, ErrorCorrectionLevel.M)
+                put(EncodeHintType.MARGIN, 0)
+            }
+            val matrix = QRCodeWriter().encode(url, BarcodeFormat.QR_CODE, 0, 0, hints)
+            val mWidth = matrix.width
+            val mHeight = matrix.height
+            val scale = (280 / mWidth).coerceIn(6, 12)
+            val bmpW = mWidth * scale
+            val bmpH = mHeight * scale
+            val pixels = IntArray(bmpW * bmpH)
+            for (my in 0 until mHeight) {
+                val rowBase = my * scale * bmpW
+                for (mx in 0 until mWidth) {
+                    val color = if (matrix.get(mx, my)) Color.BLACK else Color.WHITE
+                    val colBase = mx * scale
+                    for (dy in 0 until scale) {
+                        val offset = rowBase + dy * bmpW + colBase
+                        for (dx in 0 until scale) {
+                            pixels[offset + dx] = color
+                        }
+                    }
+                }
+            }
+            val bmp = Bitmap.createBitmap(bmpW, bmpH, Bitmap.Config.ARGB_8888)
+            bmp.setPixels(pixels, 0, bmpW, 0, 0, bmpW, bmpH)
+            synchronized(qrBitmapCache) {
+                qrBitmapCache.put(url, bmp)
+            }
+            bmp
+        }.getOrNull()
+    }
+
     private fun drawGpsMapThumbnailBox(
         canvas: Canvas,
         mapRect: RectF,
         cornerRadius: Float,
         unit: Float,
         alphaInt: Int,
-        hasGpsFix: Boolean,
+        gps: GpsSnapshot,
         satelliteBitmap: Bitmap?
     ) {
         canvas.save()
@@ -1129,7 +1193,7 @@ object WatermarkRenderer {
             val bmpPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
             canvas.drawBitmap(satelliteBitmap, srcRect, mapRect, bmpPaint)
 
-            // Crisp red location pin centered on the actual location
+            // Crisp red location pin centered on the actual satellite location
             val pinSize = min(mapRect.width(), mapRect.height()) * 0.30f
             drawRedLocationPin(
                 canvas = canvas,
@@ -1138,37 +1202,85 @@ object WatermarkRenderer {
                 pinHeight = pinSize
             )
         } else {
-            // Honest fallback when satellite Maps API is unavailable or GPS fix is not acquired yet
+            val qrBitmap = if (hasValidQrCoordinates(gps)) {
+                getOrCreateLocationQrBitmap(gps.latitude, gps.longitude)
+            } else {
+                null
+            }
+
             val fallbackBg = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                color = Color.argb(alphaInt, 22, 26, 32)
+                color = Color.argb(alphaInt, 14, 17, 23)
                 style = Paint.Style.FILL
             }
             canvas.drawRect(mapRect, fallbackBg)
 
-            val pinHeight = min(mapRect.width(), mapRect.height()) * 0.28f
-            drawRedLocationPin(
-                canvas = canvas,
-                cx = mapRect.centerX(),
-                tipY = mapRect.centerY() - (4f * unit),
-                pinHeight = pinHeight
-            )
+            if (qrBitmap != null && !qrBitmap.isRecycled) {
+                val outerPad = (4.5f * unit).coerceAtLeast(3f)
+                val captionGap = (3.0f * unit).coerceAtLeast(2f)
+                val captionPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+                    color = Color.parseColor("#F8FAFC")
+                    textSize = (6.6f * unit).coerceAtLeast(5.2f)
+                    typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+                }
+                val captionWidth = (mapRect.width() - outerPad * 2f).toInt().coerceAtLeast(28)
+                val captionLayout = StaticLayout.Builder
+                    .obtain(GPS_MAP_QR_CAPTION, 0, GPS_MAP_QR_CAPTION.length, captionPaint, captionWidth)
+                    .setAlignment(Layout.Alignment.ALIGN_CENTER)
+                    .setIncludePad(false)
+                    .setLineSpacing(0f, 0.95f)
+                    .setMaxLines(2)
+                    .build()
 
-            val msg = if (hasGpsFix) "Map\nUnavailable" else "No GPS\nFix"
-            val msgPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-                color = Color.parseColor("#CBD5E1")
-                textSize = (9.5f * unit).coerceAtLeast(7f)
-                typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+                val availQrW = (mapRect.width() - outerPad * 2f).coerceAtLeast(20f)
+                val availQrH = (mapRect.height() - outerPad * 2f - captionGap - captionLayout.height).coerceAtLeast(20f)
+                val qrCardSize = min(availQrW, availQrH)
+                val stackHeight = qrCardSize + captionGap + captionLayout.height
+                val stackTop = mapRect.top + ((mapRect.height() - stackHeight) / 2f).coerceAtLeast(outerPad)
+                val qrLeft = mapRect.centerX() - qrCardSize / 2f
+                val qrCardRect = RectF(qrLeft, stackTop, qrLeft + qrCardSize, stackTop + qrCardSize)
+
+                val qrBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                    color = Color.WHITE
+                    style = Paint.Style.FILL
+                }
+                val qrCardRadius = (4.5f * unit).coerceAtLeast(2.5f)
+                canvas.drawRoundRect(qrCardRect, qrCardRadius, qrCardRadius, qrBgPaint)
+
+                val quietPad = (qrCardSize * 0.085f).coerceAtLeast(3f)
+                val qrDrawRect = RectF(
+                    qrCardRect.left + quietPad,
+                    qrCardRect.top + quietPad,
+                    qrCardRect.right - quietPad,
+                    qrCardRect.bottom - quietPad
+                )
+                val qrPaint = Paint().apply {
+                    isAntiAlias = false
+                    isFilterBitmap = false
+                }
+                canvas.drawBitmap(qrBitmap, null, qrDrawRect, qrPaint)
+
+                canvas.save()
+                canvas.translate(mapRect.centerX() - captionWidth / 2f, qrCardRect.bottom + captionGap)
+                captionLayout.draw(canvas)
+                canvas.restore()
+            } else {
+                val msg = "Location\nUnavailable"
+                val msgPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+                    color = Color.parseColor("#CBD5E1")
+                    textSize = (9.5f * unit).coerceAtLeast(7f)
+                    typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+                }
+                val msgWidth = (mapRect.width() - 10f * unit).toInt().coerceAtLeast(32)
+                val msgLayout = StaticLayout.Builder.obtain(msg, 0, msg.length, msgPaint, msgWidth)
+                    .setAlignment(Layout.Alignment.ALIGN_CENTER)
+                    .setIncludePad(false)
+                    .setMaxLines(2)
+                    .build()
+                canvas.save()
+                canvas.translate(mapRect.centerX() - msgWidth / 2f, mapRect.centerY() - msgLayout.height / 2f)
+                msgLayout.draw(canvas)
+                canvas.restore()
             }
-            val msgWidth = (mapRect.width() - 10f * unit).toInt().coerceAtLeast(32)
-            val msgLayout = StaticLayout.Builder.obtain(msg, 0, msg.length, msgPaint, msgWidth)
-                .setAlignment(Layout.Alignment.ALIGN_CENTER)
-                .setIncludePad(false)
-                .setMaxLines(2)
-                .build()
-            canvas.save()
-            canvas.translate(mapRect.centerX() - msgWidth / 2f, mapRect.centerY() + (2f * unit))
-            msgLayout.draw(canvas)
-            canvas.restore()
         }
         canvas.restore()
 
